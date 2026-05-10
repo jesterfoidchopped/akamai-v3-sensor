@@ -1,0 +1,82 @@
+# Binaries
+sensor-daemon
+bindings/clib/sensor-clib
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+debug
+*.log
+
+# Forked dependencies (separate repos)
+temp/
+
+# Test binaries (in root)
+/test_cloudflare
+/test_fingerprint
+/test_cookie_isolation
+/test_session_resumption
+/custom-fingerprint
+/streaming
+tests/
+# Internal tests (not published)
+internal_tests/
+# Root-level _test.go files stay local (subdir tests still ship)
+/*_test.go
+
+# Local workspace config (points at machine-local fork paths)
+go.work
+go.work.sum
+
+# Local docs/notes (not published)
+PREPARE.md
+BUILDING.md
+CLAUDE.md
+TRANSPORT_AUDIT.md
+chrome_session_import_plan.md
+debug.md
+features.md
+browser_import_plan.md
+ech_fix.md
+
+# Public docs site (Docusaurus) — tracked. Only the build artifacts ignored.
+docs/node_modules/
+docs/build/
+docs/.docusaurus/
+docs/.cache-loader/
+
+# Temp images
+image copy*.png
+
+# Plans/notes directory
+plans/
+
+# Internal documentation (not published)
+internal_docs/
+
+# Test files with credentials
+cmd/
+debugs/
+issues_reply/
+library_locations.md

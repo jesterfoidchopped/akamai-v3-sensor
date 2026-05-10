@@ -1,0 +1,62 @@
+{
+  "name": "sensor",
+  "version": "1.6.6",
+  "description": "Browser fingerprint emulation HTTP client with HTTP/1.1, HTTP/2, and HTTP/3 support",
+  "main": "lib/index.js",
+  "module": "lib/index.mjs",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./lib/index.d.ts",
+        "default": "./lib/index.mjs"
+      },
+      "require": {
+        "types": "./lib/index.d.ts",
+        "default": "./lib/index.js"
+      }
+    }
+  },
+  "scripts": {
+    "test": "node test.js",
+    "test:esm": "node test.mjs",
+    "setup-packages": "node scripts/setup-npm-packages.js"
+  },
+  "keywords": [
+    "http",
+    "http2",
+    "http3",
+    "quic",
+    "tls",
+    "fingerprint",
+    "browser",
+    "scraping",
+    "bot-detection"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jesterfoidchopped/akamai-v3-sensor"
+  },
+  "bugs": {
+    "url": "https://github.com/jesterfoidchopped/akamai-v3-sensor/issues"
+  },
+  "homepage": "https://github.com/jesterfoidchopped/akamai-v3-sensor#readme",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {
+    "koffi": "^2.9.0"
+  },
+  "optionalDependencies": {
+    "@sensor/darwin-arm64": "1.6.6",
+    "@sensor/darwin-x64": "1.6.6",
+    "@sensor/linux-arm64": "1.6.6",
+    "@sensor/linux-x64": "1.6.6",
+    "@sensor/win32-x64": "1.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.1.0",
+    "typescript": "^5.9.3"
+  }
+}

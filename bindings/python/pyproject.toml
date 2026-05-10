@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sensor"
+version = "1.6.6"
+description = "Browser fingerprint emulation HTTP client with HTTP/1.1, HTTP/2, and HTTP/3 support"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+keywords = ["http", "http2", "http3", "quic", "tls", "fingerprint", "browser", "scraping"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/jesterfoidchopped/akamai-v3-sensor"
+Documentation = "https://github.com/jesterfoidchopped/akamai-v3-sensor#readme"
+Repository = "https://github.com/jesterfoidchopped/akamai-v3-sensor"
+Issues = "https://github.com/jesterfoidchopped/akamai-v3-sensor/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+sensor = ["lib/*"]

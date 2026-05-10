@@ -1,0 +1,3700 @@
+/**
+ * HTTPCloak Node.js Client
+ *
+ * A fetch/axios-compatible HTTP client with browser fingerprint emulation.
+ * Provides TLS fingerprinting for HTTP requests.
+ */
+
+const koffi = require("koffi");
+const path = require("path");
+const os = require("os");
+const fs = require("fs");
+
+/**
+ * Custom error class for HTTPCloak errors
+ */
+class HTTPCloakError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "HTTPCloakError";
+  }
+}
+
+/**
+ * Available browser presets for TLS fingerprinting.
+ *
+ * Use these constants instead of typing preset strings manually:
+ *   const sensor = require("sensor");
+ *   sensor.configure({ preset: sensor.Preset.CHROME_143 });
+ *
+ *   // Or with Session
+ *   const session = new sensor.Session({ preset: sensor.Preset.FIREFOX_133 });
+ */
+const Preset = {
+  CHROME_146: "chrome-146",
+  CHROME_146_WINDOWS: "chrome-146-windows",
+  CHROME_146_LINUX: "chrome-146-linux",
+  CHROME_146_MACOS: "chrome-146-macos",
+
+  CHROME_145: "chrome-145",
+  CHROME_145_WINDOWS: "chrome-145-windows",
+  CHROME_145_LINUX: "chrome-145-linux",
+  CHROME_145_MACOS: "chrome-145-macos",
+
+  CHROME_144: "chrome-144",
+  CHROME_144_WINDOWS: "chrome-144-windows",
+  CHROME_144_LINUX: "chrome-144-linux",
+  CHROME_144_MACOS: "chrome-144-macos",
+
+  CHROME_143: "chrome-143",
+  CHROME_143_WINDOWS: "chrome-143-windows",
+  CHROME_143_LINUX: "chrome-143-linux",
+  CHROME_143_MACOS: "chrome-143-macos",
+
+  CHROME_141: "chrome-141",
+
+  CHROME_133: "chrome-133",
+
+  CHROME_143_IOS: "chrome-143-ios",
+  CHROME_144_IOS: "chrome-144-ios",
+  CHROME_145_IOS: "chrome-145-ios",
+  CHROME_146_IOS: "chrome-146-ios",
+  CHROME_143_ANDROID: "chrome-143-android",
+  CHROME_144_ANDROID: "chrome-144-android",
+  CHROME_145_ANDROID: "chrome-145-android",
+  CHROME_146_ANDROID: "chrome-146-android",
+
+  FIREFOX_133: "firefox-133",
+
+  SAFARI_18: "safari-18",
+  SAFARI_17_IOS: "safari-17-ios",
+  SAFARI_18_IOS: "safari-18-ios",
+
+  IOS_CHROME_143: "chrome-143-ios",
+  IOS_CHROME_144: "chrome-144-ios",
+  IOS_CHROME_145: "chrome-145-ios",
+  IOS_CHROME_146: "chrome-146-ios",
+  ANDROID_CHROME_143: "chrome-143-android",
+  ANDROID_CHROME_144: "chrome-144-android",
+  ANDROID_CHROME_145: "chrome-145-android",
+  ANDROID_CHROME_146: "chrome-146-android",
+  IOS_SAFARI_17: "safari-17-ios",
+  IOS_SAFARI_18: "safari-18-ios",
+
+  /**
+   * Get all available preset names
+   * @returns {string[]} List of all preset names
+   */
+  all() {
+    return [
+      this.CHROME_146, this.CHROME_146_WINDOWS, this.CHROME_146_LINUX, this.CHROME_146_MACOS,
+      this.CHROME_145, this.CHROME_145_WINDOWS, this.CHROME_145_LINUX, this.CHROME_145_MACOS,
+      this.CHROME_144, this.CHROME_144_WINDOWS, this.CHROME_144_LINUX, this.CHROME_144_MACOS,
+      this.CHROME_143, this.CHROME_143_WINDOWS, this.CHROME_143_LINUX, this.CHROME_143_MACOS,
+      this.CHROME_141, this.CHROME_133,
+      this.CHROME_146_IOS, this.CHROME_145_IOS, this.CHROME_144_IOS, this.CHROME_143_IOS,
+      this.CHROME_146_ANDROID, this.CHROME_145_ANDROID, this.CHROME_144_ANDROID, this.CHROME_143_ANDROID,
+      this.FIREFOX_133,
+      this.SAFARI_18, this.SAFARI_17_IOS, this.SAFARI_18_IOS,
+    ];
+  },
+};
+
+/**
+ * HTTP status reason phrases
+ */
+const HTTP_STATUS_PHRASES = {
+  100: "Continue", 101: "Switching Protocols", 102: "Processing",
+  200: "OK", 201: "Created", 202: "Accepted", 203: "Non-Authoritative Information",
+  204: "No Content", 205: "Reset Content", 206: "Partial Content", 207: "Multi-Status",
+  300: "Multiple Choices", 301: "Moved Permanently", 302: "Found", 303: "See Other",
+  304: "Not Modified", 305: "Use Proxy", 307: "Temporary Redirect", 308: "Permanent Redirect",
+  400: "Bad Request", 401: "Unauthorized", 402: "Payment Required", 403: "Forbidden",
+  404: "Not Found", 405: "Method Not Allowed", 406: "Not Acceptable",
+  407: "Proxy Authentication Required", 408: "Request Timeout", 409: "Conflict",
+  410: "Gone", 411: "Length Required", 412: "Precondition Failed",
+  413: "Payload Too Large", 414: "URI Too Long", 415: "Unsupported Media Type",
+  416: "Range Not Satisfiable", 417: "Expectation Failed", 418: "I'm a teapot",
+  421: "Misdirected Request", 422: "Unprocessable Entity", 423: "Locked",
+  424: "Failed Dependency", 425: "Too Early", 426: "Upgrade Required",
+  428: "Precondition Required", 429: "Too Many Requests",
+  431: "Request Header Fields Too Large", 451: "Unavailable For Legal Reasons",
+  500: "Internal Server Error", 501: "Not Implemented", 502: "Bad Gateway",
+  503: "Service Unavailable", 504: "Gateway Timeout", 505: "HTTP Version Not Supported",
+  506: "Variant Also Negotiates", 507: "Insufficient Storage", 508: "Loop Detected",
+  510: "Not Extended", 511: "Network Authentication Required",
+};
+
+/**
+ * Cookie object from Set-Cookie header
+ */
+class Cookie {
+  /**
+   * @param {Object} data - Cookie data from response
+   * @param {string} data.name - Cookie name
+   * @param {string} data.value - Cookie value
+   * @param {string} [data.domain] - Cookie domain
+   * @param {string} [data.path] - Cookie path
+   * @param {string} [data.expires] - Expiration date (RFC1123 format)
+   * @param {number} [data.max_age] - Max age in seconds
+   * @param {boolean} [data.secure] - Secure flag
+   * @param {boolean} [data.http_only] - HttpOnly flag
+   * @param {string} [data.same_site] - SameSite attribute (Strict, Lax, None)
+   */
+  constructor(data) {
+    if (typeof data === 'string') {
+      this.name = data;
+      this.value = arguments[1] || "";
+      this.domain = "";
+      this.path = "";
+      this.expires = "";
+      this.maxAge = 0;
+      this.secure = false;
+      this.httpOnly = false;
+      this.sameSite = "";
+    } else {
+      this.name = data.name || "";
+      this.value = data.value || "";
+      this.domain = data.domain || "";
+      this.path = data.path || "";
+      this.expires = data.expires || "";
+      this.maxAge = data.max_age || 0;
+      this.secure = data.secure || false;
+      this.httpOnly = data.http_only || false;
+      this.sameSite = data.same_site || "";
+    }
+  }
+
+  toString() {
+    let str = `Cookie(name=${this.name}, value=${this.value}`;
+    if (this.domain) str += `, domain=${this.domain}`;
+    if (this.path) str += `, path=${this.path}`;
+    if (this.secure) str += `, secure`;
+    if (this.httpOnly) str += `, httpOnly`;
+    if (this.sameSite) str += `, sameSite=${this.sameSite}`;
+    str += `)`;
+    return str;
+  }
+}
+
+/**
+ * Redirect info from history
+ */
+class RedirectInfo {
+  /**
+   * @param {number} statusCode - HTTP status code
+   * @param {string} url - Request URL
+   * @param {Object} headers - Response headers
+   */
+  constructor(statusCode, url, headers) {
+    this.statusCode = statusCode;
+    this.url = url;
+    this.headers = headers || {};
+  }
+
+  toString() {
+    return `RedirectInfo(statusCode=${this.statusCode}, url=${this.url})`;
+  }
+}
+
+/**
+ * Response object returned from HTTP requests
+ */
+class Response {
+  /**
+   * @param {Object} data - Response data from native library
+   * @param {number} [elapsed=0] - Elapsed time in milliseconds
+   */
+  constructor(data, elapsed = 0, rawBody = null) {
+    this.statusCode = data.status_code || 0;
+    this.headers = data.headers || {};
+    if (rawBody !== null) {
+      this._body = rawBody;
+      this._text = rawBody.toString("utf8"); // best-effort text view
+    } else {
+      const bodyStr = data.body || "";
+      if (data.body_encoding === "base64") {
+        this._body = Buffer.from(bodyStr, "base64");
+        this._text = this._body.toString("utf8");
+      } else {
+        this._body = Buffer.from(bodyStr, "utf8");
+        this._text = bodyStr;
+      }
+    }
+    this.finalUrl = data.final_url || "";
+    this.protocol = data.protocol || "";
+    this.elapsed = elapsed; // milliseconds
+
+    this._cookies = (data.cookies || []).map(c => new Cookie(c));
+
+    this._history = (data.history || []).map(h => new RedirectInfo(
+      h.status_code || 0,
+      h.url || "",
+      h.headers || {}
+    ));
+  }
+
+  /** Cookies set by this response */
+  get cookies() {
+    return this._cookies;
+  }
+
+  /** Redirect history (list of RedirectInfo objects) */
+  get history() {
+    return this._history;
+  }
+
+  /** Response body as string */
+  get text() {
+    return this._text;
+  }
+
+  /** Response body as Buffer (requests compatibility) */
+  get body() {
+    return this._body;
+  }
+
+  /** Response body as Buffer (requests compatibility alias) */
+  get content() {
+    return this._body;
+  }
+
+  /** Final URL after redirects (requests compatibility alias) */
+  get url() {
+    return this.finalUrl;
+  }
+
+  /** True if status code < 400 (requests compatibility) */
+  get ok() {
+    return this.statusCode < 400;
+  }
+
+  /** HTTP status reason phrase (e.g., 'OK', 'Not Found') */
+  get reason() {
+    return HTTP_STATUS_PHRASES[this.statusCode] || "Unknown";
+  }
+
+  /**
+   * Response encoding from Content-Type header.
+   * Returns null if not specified.
+   */
+  get encoding() {
+    let contentType = this.headers["content-type"] || this.headers["Content-Type"] || "";
+    if (contentType.includes("charset=")) {
+      const parts = contentType.split(";");
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (trimmed.toLowerCase().startsWith("charset=")) {
+          return trimmed.split("=")[1].trim().replace(/['"]/g, "");
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Parse response body as JSON
+   */
+  json() {
+    return JSON.parse(this._text);
+  }
+
+  /**
+   * Raise error if status >= 400 (requests compatibility)
+   */
+  raiseForStatus() {
+    if (!this.ok) {
+      throw new HTTPCloakError(`HTTP ${this.statusCode}: ${this.reason}`);
+    }
+  }
+}
+
+/**
+ * High-performance buffer pool using SharedArrayBuffer for zero-allocation copies.
+ * Pre-allocates a large buffer once and reuses it across requests.
+ */
+class FastBufferPool {
+  constructor() {
+    this._sharedBuffer = new SharedArrayBuffer(256 * 1024 * 1024);
+    this._bufferView = Buffer.from(this._sharedBuffer);
+    this._inUse = false;
+
+    this._fallbackPools = new Map();
+    this._tiers = [1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864, 134217728];
+  }
+
+  /**
+   * Get a buffer of at least the requested size
+   * @param {number} size - Minimum buffer size needed
+   * @returns {Buffer} - A buffer (may be larger than requested)
+   */
+  acquire(size) {
+    if (!this._inUse && size <= this._sharedBuffer.byteLength) {
+      this._inUse = true;
+      return this._bufferView;
+    }
+
+    let tier = this._tiers[this._tiers.length - 1];
+    for (const t of this._tiers) {
+      if (t >= size) {
+        tier = t;
+        break;
+      }
+    }
+
+    const pool = this._fallbackPools.get(tier);
+    if (pool && pool.length > 0) {
+      return pool.pop();
+    }
+
+    return Buffer.allocUnsafe(Math.max(tier, size));
+  }
+
+  /**
+   * Return a buffer to the pool for reuse
+   * @param {Buffer} buffer - Buffer to return
+   */
+  release(buffer) {
+    if (buffer.buffer === this._sharedBuffer) {
+      this._inUse = false;
+      return;
+    }
+
+    const size = buffer.length;
+    if (!this._tiers.includes(size)) {
+      return;
+    }
+
+    let pool = this._fallbackPools.get(size);
+    if (!pool) {
+      pool = [];
+      this._fallbackPools.set(size, pool);
+    }
+
+    if (pool.length < 2) {
+      pool.push(buffer);
+    }
+  }
+}
+
+const _bufferPool = new FastBufferPool();
+
+/**
+ * Fast response object with zero-copy buffer transfer.
+ *
+ * This response type avoids JSON serialization and base64 encoding for the body,
+ * copying data directly from Go's memory to a Node.js Buffer.
+ *
+ * Use session.getFast() for maximum download performance.
+ */
+class FastResponse {
+  /**
+   * @param {Object} metadata - Response metadata from native library
+   * @param {Buffer} body - Response body as Buffer (view of pooled buffer)
+   * @param {number} [elapsed=0] - Elapsed time in milliseconds
+   * @param {Buffer} [pooledBuffer=null] - The underlying pooled buffer for release
+   */
+  constructor(metadata, body, elapsed = 0, pooledBuffer = null) {
+    this.statusCode = metadata.status_code || 0;
+    this.headers = metadata.headers || {};
+    this._body = body;
+    this._pooledBuffer = pooledBuffer;
+    this.finalUrl = metadata.final_url || "";
+    this.protocol = metadata.protocol || "";
+    this.elapsed = elapsed;
+
+    this._cookies = (metadata.cookies || []).map(c => new Cookie(c));
+
+    this._history = (metadata.history || []).map(h => new RedirectInfo(
+      h.status_code || 0,
+      h.url || "",
+      h.headers || {}
+    ));
+  }
+
+  /**
+   * Release the underlying buffer back to the pool.
+   * Call this when done with the response to enable buffer reuse.
+   * After calling release(), the body buffer should not be used.
+   */
+  release() {
+    if (this._pooledBuffer) {
+      _bufferPool.release(this._pooledBuffer);
+      this._pooledBuffer = null;
+      this._body = null;
+    }
+  }
+
+  /** Cookies set by this response */
+  get cookies() {
+    return this._cookies;
+  }
+
+  /** Redirect history (list of RedirectInfo objects) */
+  get history() {
+    return this._history;
+  }
+
+  /** Response body as string */
+  get text() {
+    return this._body.toString("utf8");
+  }
+
+  /** Response body as Buffer */
+  get body() {
+    return this._body;
+  }
+
+  /** Response body as Buffer (requests compatibility alias) */
+  get content() {
+    return this._body;
+  }
+
+  /** Final URL after redirects (requests compatibility alias) */
+  get url() {
+    return this.finalUrl;
+  }
+
+  /** True if status code < 400 (requests compatibility) */
+  get ok() {
+    return this.statusCode < 400;
+  }
+
+  /** HTTP status reason phrase (e.g., 'OK', 'Not Found') */
+  get reason() {
+    return HTTP_STATUS_PHRASES[this.statusCode] || "Unknown";
+  }
+
+  /**
+   * Response encoding from Content-Type header.
+   * Returns null if not specified.
+   */
+  get encoding() {
+    let contentType = this.headers["content-type"] || this.headers["Content-Type"] || "";
+    if (contentType.includes("charset=")) {
+      const parts = contentType.split(";");
+      for (const part of parts) {
+        const trimmed = part.trim();
+        if (trimmed.toLowerCase().startsWith("charset=")) {
+          return trimmed.split("=")[1].trim().replace(/['"]/g, "");
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Parse response body as JSON
+   */
+  json() {
+    return JSON.parse(this._body.toString("utf8"));
+  }
+
+  /**
+   * Raise error if status >= 400 (requests compatibility)
+   */
+  raiseForStatus() {
+    if (!this.ok) {
+      throw new HTTPCloakError(`HTTP ${this.statusCode}: ${this.reason}`);
+    }
+  }
+}
+
+/**
+ * Streaming HTTP Response for downloading large files.
+ *
+ * Example:
+ *   const stream = session.getStream(url);
+ *   for await (const chunk of stream) {
+ *     file.write(chunk);
+ *   }
+ *   stream.close();
+ */
+class StreamResponse {
+  /**
+   * @param {number} streamHandle - Native stream handle
+   * @param {Object} lib - Native library
+   * @param {Object} metadata - Stream metadata
+   */
+  constructor(streamHandle, lib, metadata) {
+    this._handle = streamHandle;
+    this._lib = lib;
+    this.statusCode = metadata.status_code || 0;
+    this.headers = metadata.headers || {};
+    this.finalUrl = metadata.final_url || "";
+    this.protocol = metadata.protocol || "";
+    this.contentLength = metadata.content_length || -1;
+    this._cookies = (metadata.cookies || []).map(c => new Cookie(c));
+    this._closed = false;
+  }
+
+  /** Cookies set by this response */
+  get cookies() {
+    return this._cookies;
+  }
+
+  /** Final URL after redirects */
+  get url() {
+    return this.finalUrl;
+  }
+
+  /** True if status code < 400 */
+  get ok() {
+    return this.statusCode < 400;
+  }
+
+  /** HTTP status reason phrase */
+  get reason() {
+    return HTTP_STATUS_PHRASES[this.statusCode] || "Unknown";
+  }
+
+  /**
+   * Read a chunk of data from the stream.
+   * @param {number} [chunkSize=8192] - Maximum bytes to read
+   * @returns {Buffer|null} - Chunk of data or null if EOF
+   */
+  readChunk(chunkSize = 8192) {
+    if (this._closed) {
+      throw new HTTPCloakError("Stream is closed");
+    }
+
+    const result = this._lib.sensor_stream_read(this._handle, chunkSize);
+    if (!result || result === "") {
+      return null; // EOF
+    }
+
+    return Buffer.from(result, "base64");
+  }
+
+  /**
+   * Async generator for iterating over chunks.
+   * @param {number} [chunkSize=8192] - Size of each chunk
+   * @yields {Buffer} - Chunks of response content
+   *
+   * Example:
+   *   for await (const chunk of stream.iterate()) {
+   *     file.write(chunk);
+   *   }
+   */
+  async *iterate(chunkSize = 8192) {
+    while (true) {
+      const chunk = this.readChunk(chunkSize);
+      if (!chunk) {
+        break;
+      }
+      yield chunk;
+    }
+  }
+
+  /**
+   * Symbol.asyncIterator for for-await-of loops.
+   * @yields {Buffer} - Chunks of response content
+   *
+   * Example:
+   *   for await (const chunk of stream) {
+   *     file.write(chunk);
+   *   }
+   */
+  [Symbol.asyncIterator]() {
+    return this.iterate();
+  }
+
+  /**
+   * Read the entire response body as Buffer.
+   * Warning: This defeats the purpose of streaming for large files.
+   * @returns {Buffer}
+   */
+  readAll() {
+    const chunks = [];
+    let chunk;
+    while ((chunk = this.readChunk()) !== null) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  /**
+   * Read the entire response body as string.
+   * @returns {string}
+   */
+  get text() {
+    return this.readAll().toString("utf8");
+  }
+
+  /**
+   * Read the entire response body as Buffer.
+   * @returns {Buffer}
+   */
+  get body() {
+    return this.readAll();
+  }
+
+  /**
+   * Parse the response body as JSON.
+   * @returns {any}
+   */
+  json() {
+    return JSON.parse(this.text);
+  }
+
+  /**
+   * Close the stream and release resources.
+   */
+  close() {
+    if (!this._closed) {
+      this._lib.sensor_stream_close(this._handle);
+      this._closed = true;
+    }
+  }
+
+  /**
+   * Raise error if status >= 400
+   */
+  raiseForStatus() {
+    if (!this.ok) {
+      throw new HTTPCloakError(`HTTP ${this.statusCode}: ${this.reason}`);
+    }
+  }
+}
+
+/**
+ * Get the platform package name for the current platform
+ */
+function getPlatformPackageName() {
+  const platform = os.platform();
+  const arch = os.arch();
+
+  let platName;
+  if (platform === "darwin") {
+    platName = "darwin";
+  } else if (platform === "win32") {
+    platName = "win32";
+  } else {
+    platName = "linux";
+  }
+
+  let archName;
+  if (arch === "x64" || arch === "amd64") {
+    archName = "x64";
+  } else if (arch === "arm64" || arch === "aarch64") {
+    archName = "arm64";
+  } else {
+    archName = arch;
+  }
+
+  return `@sensor/${platName}-${archName}`;
+}
+
+/**
+ * Get the path to the native library
+ */
+function getLibPath() {
+  const platform = os.platform();
+  const arch = os.arch();
+
+  const envPath = process.env.HTTPCLOAK_LIB_PATH;
+  if (envPath && fs.existsSync(envPath)) {
+    return envPath;
+  }
+
+  const packageName = getPlatformPackageName();
+  try {
+    const libPath = require(packageName);
+    if (fs.existsSync(libPath)) {
+      return libPath;
+    }
+  } catch (e) {
+  }
+
+  let archName;
+  if (arch === "x64" || arch === "amd64") {
+    archName = "amd64";
+  } else if (arch === "arm64" || arch === "aarch64") {
+    archName = "arm64";
+  } else {
+    archName = arch;
+  }
+
+  let osName, ext;
+  if (platform === "darwin") {
+    osName = "darwin";
+    ext = ".dylib";
+  } else if (platform === "win32") {
+    osName = "windows";
+    ext = ".dll";
+  } else {
+    osName = "linux";
+    ext = ".so";
+  }
+
+  const libName = `libsensor-${osName}-${archName}${ext}`;
+
+  const searchPaths = [
+    path.join(__dirname, libName),
+    path.join(__dirname, "..", libName),
+    path.join(__dirname, "..", "lib", libName),
+  ];
+
+  for (const searchPath of searchPaths) {
+    if (fs.existsSync(searchPath)) {
+      return searchPath;
+    }
+  }
+
+  throw new HTTPCloakError(
+    `Could not find sensor library (${libName}). ` +
+      `Try: npm install ${packageName}`
+  );
+}
+
+const AsyncCallbackProto = koffi.proto("void AsyncCallback(int64 callbackId, str responseJson, str error)");
+
+const SessionCacheGetProto = koffi.proto("str SessionCacheGet(str key)");
+const SessionCachePutProto = koffi.proto("int SessionCachePut(str key, str valueJson, int64 ttlSeconds)");
+const SessionCacheDeleteProto = koffi.proto("int SessionCacheDelete(str key)");
+const SessionCacheErrorProto = koffi.proto("void SessionCacheError(str operation, str key, str error)");
+const EchCacheGetProto = koffi.proto("str EchCacheGet(str key)");
+const EchCachePutProto = koffi.proto("int EchCachePut(str key, str valueBase64, int64 ttlSeconds)");
+
+const AsyncCacheGetProto = koffi.proto("void AsyncCacheGet(int64 requestId, str key)");
+const AsyncCachePutProto = koffi.proto("void AsyncCachePut(int64 requestId, str key, str valueJson, int64 ttlSeconds)");
+const AsyncCacheDeleteProto = koffi.proto("void AsyncCacheDelete(int64 requestId, str key)");
+const AsyncEchGetProto = koffi.proto("void AsyncEchGet(int64 requestId, str key)");
+const AsyncEchPutProto = koffi.proto("void AsyncEchPut(int64 requestId, str key, str valueBase64, int64 ttlSeconds)");
+
+let lib = null;
+let nativeLibHandle = null;
+
+function getLib() {
+  if (lib === null) {
+    const libPath = getLibPath();
+    nativeLibHandle = koffi.load(libPath);
+
+    const sensorFreeString = nativeLibHandle.func("sensor_free_string", "void", ["void*"]);
+
+    const HeapStr = koffi.disposable("HeapStr", "str", sensorFreeString);
+
+    lib = {
+      sensor_session_new: nativeLibHandle.func("sensor_session_new", "int64", ["str"]),
+      sensor_session_free: nativeLibHandle.func("sensor_session_free", "void", ["int64"]),
+      sensor_session_refresh: nativeLibHandle.func("sensor_session_refresh", "void", ["int64"]),
+      sensor_session_refresh_protocol: nativeLibHandle.func("sensor_session_refresh_protocol", HeapStr, ["int64", "str"]),
+      sensor_session_warmup: nativeLibHandle.func("sensor_session_warmup", HeapStr, ["int64", "str", "int64"]),
+      sensor_session_fork: nativeLibHandle.func("sensor_session_fork", "int64", ["int64"]),
+      sensor_get: nativeLibHandle.func("sensor_get", HeapStr, ["int64", "str", "str"]),
+      sensor_post: nativeLibHandle.func("sensor_post", HeapStr, ["int64", "str", "str", "str"]),
+      sensor_request: nativeLibHandle.func("sensor_request", HeapStr, ["int64", "str"]),
+      sensor_get_cookies: nativeLibHandle.func("sensor_get_cookies", HeapStr, ["int64"]),
+      sensor_set_cookie: nativeLibHandle.func("sensor_set_cookie", "void", ["int64", "str"]),
+      sensor_delete_cookie: nativeLibHandle.func("sensor_delete_cookie", "void", ["int64", "str", "str"]),
+      sensor_clear_cookies: nativeLibHandle.func("sensor_clear_cookies", "void", ["int64"]),
+      sensor_free_string: sensorFreeString,
+      sensor_version: nativeLibHandle.func("sensor_version", HeapStr, []),
+      sensor_available_presets: nativeLibHandle.func("sensor_available_presets", HeapStr, []),
+      sensor_set_ech_dns_servers: nativeLibHandle.func("sensor_set_ech_dns_servers", HeapStr, ["str"]),
+      sensor_get_ech_dns_servers: nativeLibHandle.func("sensor_get_ech_dns_servers", HeapStr, []),
+      sensor_register_callback: nativeLibHandle.func("sensor_register_callback", "int64", [koffi.pointer(AsyncCallbackProto)]),
+      sensor_unregister_callback: nativeLibHandle.func("sensor_unregister_callback", "void", ["int64"]),
+      sensor_get_async: nativeLibHandle.func("sensor_get_async", "void", ["int64", "str", "str", "int64"]),
+      sensor_post_async: nativeLibHandle.func("sensor_post_async", "void", ["int64", "str", "str", "str", "int64"]),
+      sensor_request_async: nativeLibHandle.func("sensor_request_async", "void", ["int64", "str", "int64"]),
+      sensor_stream_get: nativeLibHandle.func("sensor_stream_get", "int64", ["int64", "str", "str"]),
+      sensor_stream_post: nativeLibHandle.func("sensor_stream_post", "int64", ["int64", "str", "str", "str"]),
+      sensor_stream_request: nativeLibHandle.func("sensor_stream_request", "int64", ["int64", "str"]),
+      sensor_stream_get_metadata: nativeLibHandle.func("sensor_stream_get_metadata", HeapStr, ["int64"]),
+      sensor_stream_read: nativeLibHandle.func("sensor_stream_read", HeapStr, ["int64", "int64"]),
+      sensor_stream_close: nativeLibHandle.func("sensor_stream_close", "void", ["int64"]),
+      sensor_get_raw: nativeLibHandle.func("sensor_get_raw", "int64", ["int64", "str", "str"]),
+      sensor_post_raw: nativeLibHandle.func("sensor_post_raw", "int64", ["int64", "str", "void*", "int", "str"]),
+      sensor_request_raw: nativeLibHandle.func("sensor_request_raw", "int64", ["int64", "str", "void*", "int"]),
+      sensor_response_get_metadata: nativeLibHandle.func("sensor_response_get_metadata", HeapStr, ["int64"]),
+      sensor_response_get_body_len: nativeLibHandle.func("sensor_response_get_body_len", "int", ["int64"]),
+      sensor_response_copy_body_to: nativeLibHandle.func("sensor_response_copy_body_to", "int", ["int64", "void*", "int"]),
+      sensor_response_free: nativeLibHandle.func("sensor_response_free", "void", ["int64"]),
+      sensor_response_finalize: nativeLibHandle.func("sensor_response_finalize", HeapStr, ["int64", "void*", "int"]),
+      sensor_session_save: nativeLibHandle.func("sensor_session_save", HeapStr, ["int64", "str"]),
+      sensor_session_load: nativeLibHandle.func("sensor_session_load", "int64", ["str"]),
+      sensor_session_marshal: nativeLibHandle.func("sensor_session_marshal", HeapStr, ["int64"]),
+      sensor_session_unmarshal: nativeLibHandle.func("sensor_session_unmarshal", "int64", ["str"]),
+      sensor_session_set_proxy: nativeLibHandle.func("sensor_session_set_proxy", HeapStr, ["int64", "str"]),
+      sensor_session_set_tcp_proxy: nativeLibHandle.func("sensor_session_set_tcp_proxy", HeapStr, ["int64", "str"]),
+      sensor_session_set_udp_proxy: nativeLibHandle.func("sensor_session_set_udp_proxy", HeapStr, ["int64", "str"]),
+      sensor_session_get_proxy: nativeLibHandle.func("sensor_session_get_proxy", HeapStr, ["int64"]),
+      sensor_session_get_tcp_proxy: nativeLibHandle.func("sensor_session_get_tcp_proxy", HeapStr, ["int64"]),
+      sensor_session_get_udp_proxy: nativeLibHandle.func("sensor_session_get_udp_proxy", HeapStr, ["int64"]),
+      sensor_session_set_header_order: nativeLibHandle.func("sensor_session_set_header_order", HeapStr, ["int64", "str"]),
+      sensor_session_get_header_order: nativeLibHandle.func("sensor_session_get_header_order", HeapStr, ["int64"]),
+      sensor_local_proxy_start: nativeLibHandle.func("sensor_local_proxy_start", "int64", ["str"]),
+      sensor_local_proxy_stop: nativeLibHandle.func("sensor_local_proxy_stop", "void", ["int64"]),
+      sensor_local_proxy_get_port: nativeLibHandle.func("sensor_local_proxy_get_port", "int", ["int64"]),
+      sensor_local_proxy_is_running: nativeLibHandle.func("sensor_local_proxy_is_running", "int", ["int64"]),
+      sensor_local_proxy_get_stats: nativeLibHandle.func("sensor_local_proxy_get_stats", HeapStr, ["int64"]),
+      sensor_local_proxy_register_session: nativeLibHandle.func("sensor_local_proxy_register_session", HeapStr, ["int64", "str", "int64"]),
+      sensor_local_proxy_unregister_session: nativeLibHandle.func("sensor_local_proxy_unregister_session", "int", ["int64", "str"]),
+      sensor_set_session_cache_callbacks: nativeLibHandle.func("sensor_set_session_cache_callbacks", "void", [
+        koffi.pointer(SessionCacheGetProto),
+        koffi.pointer(SessionCachePutProto),
+        koffi.pointer(SessionCacheDeleteProto),
+        koffi.pointer(EchCacheGetProto),
+        koffi.pointer(EchCachePutProto),
+        koffi.pointer(SessionCacheErrorProto),
+      ]),
+      sensor_clear_session_cache_callbacks: nativeLibHandle.func("sensor_clear_session_cache_callbacks", "void", []),
+      sensor_set_async_session_cache_callbacks: nativeLibHandle.func("sensor_set_async_session_cache_callbacks", "void", [
+        koffi.pointer(AsyncCacheGetProto),
+        koffi.pointer(AsyncCachePutProto),
+        koffi.pointer(AsyncCacheDeleteProto),
+        koffi.pointer(AsyncEchGetProto),
+        koffi.pointer(AsyncEchPutProto),
+        koffi.pointer(SessionCacheErrorProto),
+      ]),
+      sensor_async_cache_get_result: nativeLibHandle.func("sensor_async_cache_get_result", "void", ["int64", "str"]),
+      sensor_async_cache_op_result: nativeLibHandle.func("sensor_async_cache_op_result", "void", ["int64", "int"]),
+      sensor_preset_load_file: nativeLibHandle.func("sensor_preset_load_file", "void*", ["str"]),
+      sensor_preset_load_json: nativeLibHandle.func("sensor_preset_load_json", "void*", ["str"]),
+      sensor_preset_unregister: nativeLibHandle.func("sensor_preset_unregister", "void", ["str"]),
+      sensor_describe_preset: nativeLibHandle.func("sensor_describe_preset", HeapStr, ["str"]),
+      sensor_pool_load_file: nativeLibHandle.func("sensor_pool_load_file", "void*", ["str"]),
+      sensor_pool_load_json: nativeLibHandle.func("sensor_pool_load_json", "void*", ["str"]),
+      sensor_pool_pick: nativeLibHandle.func("sensor_pool_pick", "void*", ["int64"]),
+      sensor_pool_random: nativeLibHandle.func("sensor_pool_random", "void*", ["int64"]),
+      sensor_pool_next: nativeLibHandle.func("sensor_pool_next", "void*", ["int64"]),
+      sensor_pool_get: nativeLibHandle.func("sensor_pool_get", "void*", ["int64", "int64"]),
+      sensor_pool_size: nativeLibHandle.func("sensor_pool_size", "int64", ["int64"]),
+      sensor_pool_name: nativeLibHandle.func("sensor_pool_name", "void*", ["int64"]),
+      sensor_pool_free: nativeLibHandle.func("sensor_pool_free", "void", ["int64"]),
+    };
+  }
+  return lib;
+}
+
+/**
+ * Async callback manager for native Go goroutine-based async
+ *
+ * Each async request registers a callback with Go and receives a unique ID.
+ * When Go completes the request, it invokes the callback with that ID.
+ */
+class AsyncCallbackManager {
+  constructor() {
+    this._pendingRequests = new Map();
+    this._callbackPtr = null;
+    this._refTimer = null; // Timer to keep event loop alive
+  }
+
+  /**
+   * Ref the event loop to prevent Node.js from exiting while requests are pending
+   */
+  _ref() {
+    if (this._refTimer === null) {
+      this._refTimer = setInterval(() => {}, 2147483647); // Max interval
+    }
+  }
+
+  /**
+   * Unref the event loop when no more pending requests
+   */
+  _unref() {
+    if (this._pendingRequests.size === 0 && this._refTimer !== null) {
+      clearInterval(this._refTimer);
+      this._refTimer = null;
+    }
+  }
+
+  /**
+   * Ensure the callback is set up with koffi
+   */
+  _ensureCallback() {
+    if (this._callbackPtr !== null) {
+      return;
+    }
+
+    this._callbackPtr = koffi.register((callbackId, responseJson, error) => {
+      const pending = this._pendingRequests.get(Number(callbackId));
+      if (!pending) {
+        return;
+      }
+      this._pendingRequests.delete(Number(callbackId));
+      this._unref(); // Check if we can release the event loop
+
+      const { resolve, reject, startTime } = pending;
+      const elapsed = Date.now() - startTime;
+
+      if (error && error !== "") {
+        let errMsg = error;
+        try {
+          const errData = JSON.parse(error);
+          errMsg = errData.error || error;
+        } catch (e) {
+        }
+        reject(new HTTPCloakError(errMsg));
+      } else if (responseJson) {
+        try {
+          const data = JSON.parse(responseJson);
+          if (data.error) {
+            reject(new HTTPCloakError(data.error));
+          } else {
+            resolve(new Response(data, elapsed));
+          }
+        } catch (e) {
+          reject(new HTTPCloakError(`Failed to parse response: ${e.message}`));
+        }
+      } else {
+        reject(new HTTPCloakError("No response received"));
+      }
+    }, koffi.pointer(AsyncCallbackProto));
+  }
+
+  /**
+   * Register a new async request
+   * @returns {{ callbackId: number, promise: Promise<Response> }}
+   */
+  registerRequest(nativeLib) {
+    this._ensureCallback();
+
+    const callbackId = nativeLib.sensor_register_callback(this._callbackPtr);
+
+    let resolve, reject;
+    const promise = new Promise((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    const startTime = Date.now();
+
+    this._pendingRequests.set(Number(callbackId), { resolve, reject, startTime });
+    this._ref(); // Keep event loop alive
+
+    return { callbackId, promise };
+  }
+}
+
+let asyncManager = null;
+
+function getAsyncManager() {
+  if (asyncManager === null) {
+    asyncManager = new AsyncCallbackManager();
+  }
+  return asyncManager;
+}
+
+/**
+ * Convert result to string (handles both direct strings and null)
+ * With "str" return type, koffi automatically handles the conversion
+ */
+function resultToString(result) {
+  if (!result) {
+    return null;
+  }
+  return result;
+}
+
+/**
+ * Parse response from the native library
+ * @param {string} resultPtr - Result pointer from native function
+ * @param {number} [elapsed=0] - Elapsed time in milliseconds
+ * @returns {Response}
+ */
+function parseResponse(resultPtr, elapsed = 0) {
+  const result = resultToString(resultPtr);
+  if (!result) {
+    throw new HTTPCloakError("No response received");
+  }
+
+  const data = JSON.parse(result);
+
+  if (data.error) {
+    throw new HTTPCloakError(data.error);
+  }
+
+  return new Response(data, elapsed);
+}
+
+/**
+ * Parse a raw response handle returned by sensor_*_raw into a Response
+ * with a binary Buffer body. Avoids the base64 round trip used by the JSON
+ * path — binary bodies (PDFs, images, streams) land in memory once.
+ * @param {Object} lib - Native library binding
+ * @param {number|bigint} responseHandle
+ * @param {number} [elapsed=0] - Elapsed milliseconds
+ * @returns {Response}
+ */
+function parseRawResponse(lib, responseHandle, elapsed = 0) {
+  const bodyLen = lib.sensor_response_get_body_len(responseHandle);
+  if (bodyLen < 0) {
+    lib.sensor_response_free(responseHandle);
+    throw new HTTPCloakError("Failed to get response body length");
+  }
+
+  const buffer = Buffer.allocUnsafe(bodyLen);
+  const metadataStr = lib.sensor_response_finalize(responseHandle, buffer, bodyLen);
+  if (!metadataStr) {
+    throw new HTTPCloakError("Failed to finalize response");
+  }
+
+  const metadata = JSON.parse(metadataStr);
+  if (metadata.error) {
+    throw new HTTPCloakError(metadata.error);
+  }
+
+  return new Response(metadata, elapsed, buffer);
+}
+
+/**
+ * Add query parameters to URL
+ */
+function addParamsToUrl(url, params) {
+  if (!params || Object.keys(params).length === 0) {
+    return url;
+  }
+
+  const sep = url.includes('?') ? '&' : '?';
+  const parts = Object.entries(params).map(
+    ([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`
+  );
+  return url + sep + parts.join('&');
+}
+
+/**
+ * Apply basic auth to headers
+ */
+function applyAuth(headers, auth) {
+  if (!auth) {
+    return headers;
+  }
+
+  const [username, password] = auth;
+  const credentials = Buffer.from(`${username}:${password}`).toString("base64");
+
+  headers = headers ? { ...headers } : {};
+  headers["Authorization"] = `Basic ${credentials}`;
+  return headers;
+}
+
+/**
+ * Detect MIME type from filename
+ */
+function detectMimeType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  const mimeTypes = {
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".json": "application/json",
+    ".xml": "application/xml",
+    ".txt": "text/plain",
+    ".csv": "text/csv",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".bmp": "image/bmp",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".pdf": "application/pdf",
+    ".zip": "application/zip",
+    ".gz": "application/gzip",
+    ".tar": "application/x-tar",
+  };
+  return mimeTypes[ext] || "application/octet-stream";
+}
+
+/**
+ * Encode multipart form data
+ * @param {Object} data - Form fields (key-value pairs)
+ * @param {Object} files - Files to upload
+ *   Each key is the field name, value can be:
+ *   - Buffer: raw file content
+ *   - { filename, content, contentType? }: file with metadata
+ * @returns {{ body: Buffer, contentType: string }}
+ */
+function encodeMultipart(data, files) {
+  const boundary = `----HTTPCloakBoundary${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+  const parts = [];
+
+  if (data) {
+    for (const [key, value] of Object.entries(data)) {
+      parts.push(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="${key}"\r\n\r\n` +
+        `${value}\r\n`
+      );
+    }
+  }
+
+  if (files) {
+    for (const [fieldName, fileValue] of Object.entries(files)) {
+      let filename, content, contentType;
+
+      if (Buffer.isBuffer(fileValue)) {
+        filename = fieldName;
+        content = fileValue;
+        contentType = "application/octet-stream";
+      } else if (typeof fileValue === "object" && fileValue !== null) {
+        filename = fileValue.filename || fieldName;
+        content = fileValue.content;
+        contentType = fileValue.contentType || detectMimeType(filename);
+
+        if (!Buffer.isBuffer(content)) {
+          content = Buffer.from(content);
+        }
+      } else {
+        throw new HTTPCloakError(`Invalid file value for field '${fieldName}'`);
+      }
+
+      parts.push(Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="${fieldName}"; filename="${filename}"\r\n` +
+        `Content-Type: ${contentType}\r\n\r\n`
+      ));
+      parts.push(content);
+      parts.push(Buffer.from("\r\n"));
+    }
+  }
+
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+
+  const bodyParts = parts.map(p => Buffer.isBuffer(p) ? p : Buffer.from(p));
+  const body = Buffer.concat(bodyParts);
+
+  return {
+    body,
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  };
+}
+
+/**
+ * Get the sensor library version
+ */
+function version() {
+  const nativeLib = getLib();
+  const resultPtr = nativeLib.sensor_version();
+  const result = resultToString(resultPtr);
+  return result || "unknown";
+}
+
+/**
+ * Get available browser presets with their supported protocols.
+ * Returns an object mapping preset names to their info:
+ *   { "chrome-146": { protocols: ["h1", "h2", "h3"] }, ... }
+ */
+function availablePresets() {
+  const nativeLib = getLib();
+  const resultPtr = nativeLib.sensor_available_presets();
+  const result = resultToString(resultPtr);
+  if (result) {
+    return JSON.parse(result);
+  }
+  return {};
+}
+
+/**
+ * Configure the DNS servers used for ECH (Encrypted Client Hello) config queries.
+ *
+ * By default, ECH queries use Google (8.8.8.8), Cloudflare (1.1.1.1), and Quad9 (9.9.9.9).
+ * Use this function to configure custom DNS servers for environments with restricted
+ * network access or for privacy requirements.
+ *
+ * This is a global setting that affects all sessions.
+ *
+ * @param {string[]|null} servers - Array of DNS server addresses in "host:port" format (e.g., ["10.0.0.53:53"]).
+ *                                  Pass null or empty array to reset to defaults.
+ * @throws {Error} If the servers list is invalid.
+ * @example
+ * setEchDnsServers(["10.0.0.53:53", "192.168.1.1:53"]);
+ * setEchDnsServers(null);  // Reset to defaults
+ */
+function setEchDnsServers(servers) {
+  const nativeLib = getLib();
+  let serversJson = null;
+  if (servers && servers.length > 0) {
+    serversJson = JSON.stringify(servers);
+  }
+  const errorPtr = nativeLib.sensor_set_ech_dns_servers(serversJson);
+  const error = resultToString(errorPtr);
+  if (error) {
+    throw new HTTPCloakError(`Failed to set ECH DNS servers: ${error}`);
+  }
+}
+
+/**
+ * Get the current DNS servers used for ECH (Encrypted Client Hello) config queries.
+ *
+ * @returns {string[]} Array of DNS server addresses in "host:port" format.
+ * @example
+ * const servers = getEchDnsServers();
+ * console.log(servers);  // ['8.8.8.8:53', '1.1.1.1:53', '9.9.9.9:53']
+ */
+function getEchDnsServers() {
+  const nativeLib = getLib();
+  const resultPtr = nativeLib.sensor_get_ech_dns_servers();
+  const result = resultToString(resultPtr);
+  if (result) {
+    return JSON.parse(result);
+  }
+  return [];
+}
+
+/**
+ * HTTP Session with browser fingerprint emulation
+ */
+class Session {
+  /**
+   * Create a new session
+   * @param {Object} options - Session options
+   * @param {string} [options.preset="chrome-146"] - Browser preset to use
+   * @param {string} [options.proxy] - Proxy URL (e.g., "http://user:pass@host:port" or "socks5://host:port")
+   * @param {string} [options.tcpProxy] - Proxy URL for TCP protocols (HTTP/1.1, HTTP/2) - use with udpProxy for split config
+   * @param {string} [options.udpProxy] - Proxy URL for UDP protocols (HTTP/3 via MASQUE) - use with tcpProxy for split config
+   * @param {number} [options.timeout=30] - Request timeout in seconds
+   * @param {string} [options.httpVersion="auto"] - HTTP version: "auto", "h1", "h2", "h3"
+   * @param {boolean} [options.verify=true] - SSL certificate verification
+   * @param {boolean} [options.allowRedirects=true] - Follow redirects
+   * @param {number} [options.maxRedirects=10] - Maximum number of redirects to follow
+   * @param {number} [options.retry=0] - Number of retries on failure (default 0 = no retries; set positive to enable. Issue #57: prior default 3 silently retried POST/PUT/PATCH on 5xx, violating idempotency expectations)
+   * @param {number[]} [options.retryOnStatus] - Status codes to retry on (only consulted when retry > 0)
+   * @param {number} [options.retryWaitMin=500] - Minimum wait time between retries in milliseconds
+   * @param {number} [options.retryWaitMax=10000] - Maximum wait time between retries in milliseconds
+   * @param {Array} [options.auth] - Default auth [username, password] for all requests
+   * @param {Object} [options.connectTo] - Domain fronting map {requestHost: connectHost}
+   * @param {string} [options.echConfigDomain] - Domain to fetch ECH config from (e.g., "cloudflare-ech.com")
+   * @param {boolean} [options.tlsOnly=false] - TLS-only mode: skip preset HTTP headers, only apply TLS fingerprint
+   * @param {number} [options.quicIdleTimeout=0] - QUIC idle timeout in seconds (default: 30, 0 uses default)
+   */
+  constructor(options = {}) {
+    const {
+      preset = "chrome-146",
+      proxy = null,
+      tcpProxy = null,
+      udpProxy = null,
+      timeout = 30,
+      httpVersion = "auto",
+      verify = true,
+      allowRedirects = true,
+      maxRedirects = 10,
+      retry = 0,
+      retryOnStatus = null,
+      retryWaitMin = 500,
+      retryWaitMax = 10000,
+      preferIpv4 = false,
+      auth = null,
+      connectTo = null,
+      echConfigDomain = null,
+      tlsOnly = false,
+      quicIdleTimeout = 0,
+      localAddress = null,
+      keyLogFile = null,
+      enableSpeculativeTls = false,
+      switchProtocol = null,
+      withoutCookieJar = false,
+      ja3 = null,
+      akamai = null,
+      extraFp = null,
+      tcpTtl = null,
+      tcpMss = null,
+      tcpWindowSize = null,
+      tcpWindowScale = null,
+      tcpDf = null,
+    } = options;
+
+    this._lib = getLib();
+    this.headers = {}; // Default headers
+    this.auth = auth; // Default auth for all requests
+
+    const config = {
+      preset,
+      timeout,
+      http_version: httpVersion,
+    };
+    if (proxy) {
+      config.proxy = proxy;
+    }
+    if (tcpProxy) {
+      config.tcp_proxy = tcpProxy;
+    }
+    if (udpProxy) {
+      config.udp_proxy = udpProxy;
+    }
+    if (!verify) {
+      config.verify = false;
+    }
+    if (!allowRedirects) {
+      config.allow_redirects = false;
+    } else if (maxRedirects !== 10) {
+      config.max_redirects = maxRedirects;
+    }
+    config.retry = retry;
+    if (retryOnStatus) {
+      config.retry_on_status = retryOnStatus;
+    }
+    if (retryWaitMin !== 500) {
+      config.retry_wait_min = retryWaitMin;
+    }
+    if (retryWaitMax !== 10000) {
+      config.retry_wait_max = retryWaitMax;
+    }
+    if (preferIpv4) {
+      config.prefer_ipv4 = true;
+    }
+    if (connectTo) {
+      config.connect_to = connectTo;
+    }
+    if (echConfigDomain) {
+      config.ech_config_domain = echConfigDomain;
+    }
+    if (tlsOnly) {
+      config.tls_only = true;
+    }
+    if (quicIdleTimeout > 0) {
+      config.quic_idle_timeout = quicIdleTimeout;
+    }
+    if (localAddress) {
+      config.local_address = localAddress;
+    }
+    if (keyLogFile) {
+      config.key_log_file = keyLogFile;
+    }
+    if (enableSpeculativeTls) {
+      config.enable_speculative_tls = true;
+    }
+    if (switchProtocol) {
+      config.switch_protocol = switchProtocol;
+    }
+    if (withoutCookieJar) {
+      config.without_cookie_jar = true;
+    }
+    if (ja3) {
+      config.ja3 = ja3;
+    }
+    if (akamai) {
+      config.akamai = akamai;
+    }
+    if (extraFp) {
+      config.extra_fp = extraFp;
+    }
+    if (tcpTtl != null) {
+      config.tcp_ttl = tcpTtl;
+    }
+    if (tcpMss != null) {
+      config.tcp_mss = tcpMss;
+    }
+    if (tcpWindowSize != null) {
+      config.tcp_window_size = tcpWindowSize;
+    }
+    if (tcpWindowScale != null) {
+      config.tcp_window_scale = tcpWindowScale;
+    }
+    if (tcpDf != null) {
+      config.tcp_df = tcpDf;
+    }
+
+    this._handle = this._lib.sensor_session_new(JSON.stringify(config));
+
+    if (this._handle === 0n || this._handle === 0) {
+      throw new HTTPCloakError("Failed to create session");
+    }
+  }
+
+  /**
+   * Close the session and release resources
+   */
+  close() {
+    if (this._handle) {
+      this._lib.sensor_session_free(this._handle);
+      this._handle = 0n;
+    }
+  }
+
+  /**
+   * Refresh the session by closing all connections while keeping TLS session tickets.
+   * This simulates a browser page refresh - connections are severed but 0-RTT
+   * early data can be used on reconnection due to preserved session tickets.
+   * @param {string} [switchProtocol] - Optional protocol to switch to ("h1", "h2", "h3").
+   *   Overrides any switchProtocol set at construction time. Persists for future refresh() calls.
+   */
+  refresh(switchProtocol) {
+    if (this._handle) {
+      if (switchProtocol) {
+        const result = this._lib.sensor_session_refresh_protocol(this._handle, switchProtocol);
+        if (result) {
+          const data = JSON.parse(result);
+          if (data.error) {
+            throw new HTTPCloakError(data.error);
+          }
+        }
+      } else {
+        this._lib.sensor_session_refresh(this._handle);
+      }
+    }
+  }
+
+  /**
+   * Simulate a real browser page load to warm TLS sessions, cookies, and cache.
+   * Fetches the HTML page and its subresources (CSS, JS, images) with
+   * realistic headers, priorities, and timing.
+   * @param {string} url - The page URL to warm up.
+   * @param {Object} [options] - Options.
+   * @param {number} [options.timeout] - Timeout in milliseconds (default: 60000).
+   */
+  warmup(url, options = {}) {
+    if (this._handle) {
+      const timeoutMs = options.timeout || 0;
+      const result = this._lib.sensor_session_warmup(this._handle, url, timeoutMs);
+      if (result) {
+        const data = JSON.parse(result);
+        if (data.error) {
+          throw new HTTPCloakError(data.error);
+        }
+      }
+    }
+  }
+
+  /**
+   * Create n forked sessions sharing cookies and TLS session caches.
+   *
+   * Forked sessions simulate multiple browser tabs from the same browser:
+   * same cookies, same TLS resumption tickets, same fingerprint, but
+   * independent connections for parallel requests.
+   *
+   * @param {number} n - Number of sessions to create
+   * @returns {Session[]} Array of new Session objects
+   */
+  fork(n = 1) {
+    const forks = [];
+    for (let i = 0; i < n; i++) {
+      const handle = this._lib.sensor_session_fork(this._handle);
+      if (handle < 0 || handle === 0n) {
+        throw new HTTPCloakError("Failed to fork session");
+      }
+      const session = Object.create(Session.prototype);
+      session._lib = this._lib;
+      session._handle = handle;
+      session.headers = { ...this.headers };
+      session.auth = this.auth;
+      forks.push(session);
+    }
+    return forks;
+  }
+
+  /**
+   * Merge session headers with request headers
+   */
+  _mergeHeaders(headers) {
+    if (!this.headers || Object.keys(this.headers).length === 0) {
+      return headers;
+    }
+    return { ...this.headers, ...headers };
+  }
+
+  /**
+   * Apply cookies to headers
+   * @param {Object} headers - Existing headers
+   * @param {Object} cookies - Cookies to apply as key-value pairs
+   * @returns {Object} Headers with cookies applied
+   */
+  _applyCookies(headers, cookies) {
+    if (!cookies || Object.keys(cookies).length === 0) {
+      return headers;
+    }
+
+    const cookieStr = Object.entries(cookies)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; ");
+
+    headers = headers ? { ...headers } : {};
+    const existing = headers["Cookie"] || "";
+    if (existing) {
+      headers["Cookie"] = `${existing}; ${cookieStr}`;
+    } else {
+      headers["Cookie"] = cookieStr;
+    }
+    return headers;
+  }
+
+  /**
+   * Perform a synchronous GET request
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {Object} [options.headers] - Custom headers
+   * @param {Object} [options.params] - Query parameters
+   * @param {Object} [options.cookies] - Cookies to send with this request
+   * @param {Array} [options.auth] - Basic auth [username, password]
+   * @returns {Response} Response object
+   */
+  getSync(url, options = {}) {
+    const { headers = null, params = null, cookies = null, auth = null, fetchMode = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    const reqOptions = {};
+    if (mergedHeaders) {
+      reqOptions.headers = mergedHeaders;
+    }
+    if (fetchMode) {
+      reqOptions.fetch_mode = fetchMode;
+    }
+    const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
+
+    const startTime = Date.now();
+    const responseHandle = this._lib.sensor_get_raw(this._handle, url, optionsJson);
+    const elapsed = Date.now() - startTime;
+    if (responseHandle < 0 || responseHandle === 0 || responseHandle === 0n) {
+      throw new HTTPCloakError("Request failed");
+    }
+    return parseRawResponse(this._lib, responseHandle, elapsed);
+  }
+
+  /**
+   * Perform a synchronous POST request
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {string|Buffer|Object} [options.body] - Request body
+   * @param {Object} [options.json] - JSON body (will be serialized)
+   * @param {Object} [options.data] - Form data (will be URL encoded)
+   * @param {Object} [options.files] - Files to upload as multipart/form-data
+   *   Each key is the field name, value can be:
+   *   - Buffer: raw file content
+   *   - { filename, content, contentType? }: file with metadata
+   * @param {Object} [options.headers] - Custom headers
+   * @param {Object} [options.params] - Query parameters
+   * @param {Object} [options.cookies] - Cookies to send with this request
+   * @param {Array} [options.auth] - Basic auth [username, password]
+   * @returns {Response} Response object
+   */
+  postSync(url, options = {}) {
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, fetchMode = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+
+    let bodyBuffer = null;
+    if (files !== null) {
+      const formData = (data !== null && typeof data === "object") ? data : null;
+      const multipart = encodeMultipart(formData, files);
+      bodyBuffer = multipart.body;
+      mergedHeaders = mergedHeaders || {};
+      mergedHeaders["Content-Type"] = multipart.contentType;
+    } else if (json !== null) {
+      bodyBuffer = Buffer.from(JSON.stringify(json), "utf8");
+      mergedHeaders = mergedHeaders || {};
+      if (!mergedHeaders["Content-Type"]) {
+        mergedHeaders["Content-Type"] = "application/json";
+      }
+    } else if (data !== null && typeof data === "object") {
+      bodyBuffer = Buffer.from(new URLSearchParams(data).toString(), "utf8");
+      mergedHeaders = mergedHeaders || {};
+      if (!mergedHeaders["Content-Type"]) {
+        mergedHeaders["Content-Type"] = "application/x-www-form-urlencoded";
+      }
+    } else if (Buffer.isBuffer(body)) {
+      bodyBuffer = body;
+    } else if (typeof body === "string") {
+      bodyBuffer = Buffer.from(body, "utf8");
+    }
+
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    const reqOptions = {};
+    if (mergedHeaders) {
+      reqOptions.headers = mergedHeaders;
+    }
+    if (fetchMode) {
+      reqOptions.fetch_mode = fetchMode;
+    }
+    const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
+
+    const bodyPtr = bodyBuffer || Buffer.alloc(0);
+    const bodyLen = bodyBuffer ? bodyBuffer.length : 0;
+
+    const startTime = Date.now();
+    const responseHandle = this._lib.sensor_post_raw(this._handle, url, bodyPtr, bodyLen, optionsJson);
+    const elapsed = Date.now() - startTime;
+    if (responseHandle < 0 || responseHandle === 0 || responseHandle === 0n) {
+      throw new HTTPCloakError("Request failed");
+    }
+    return parseRawResponse(this._lib, responseHandle, elapsed);
+  }
+
+  /**
+   * Perform a synchronous custom HTTP request
+   * @param {string} method - HTTP method
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {Object} [options.cookies] - Cookies to send with this request
+   * @param {Object} [options.files] - Files to upload as multipart/form-data
+   * @returns {Response} Response object
+   */
+  requestSync(method, url, options = {}) {
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, timeout = null, fetchMode = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+
+    let bodyBuffer = null;
+    if (files !== null) {
+      const formData = (data !== null && typeof data === "object") ? data : null;
+      const multipart = encodeMultipart(formData, files);
+      bodyBuffer = multipart.body;
+      mergedHeaders = mergedHeaders || {};
+      mergedHeaders["Content-Type"] = multipart.contentType;
+    } else if (json !== null) {
+      bodyBuffer = Buffer.from(JSON.stringify(json), "utf8");
+      mergedHeaders = mergedHeaders || {};
+      if (!mergedHeaders["Content-Type"]) {
+        mergedHeaders["Content-Type"] = "application/json";
+      }
+    } else if (data !== null && typeof data === "object") {
+      bodyBuffer = Buffer.from(new URLSearchParams(data).toString(), "utf8");
+      mergedHeaders = mergedHeaders || {};
+      if (!mergedHeaders["Content-Type"]) {
+        mergedHeaders["Content-Type"] = "application/x-www-form-urlencoded";
+      }
+    } else if (Buffer.isBuffer(body)) {
+      bodyBuffer = body;
+    } else if (typeof body === "string") {
+      bodyBuffer = Buffer.from(body, "utf8");
+    }
+
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    const requestConfig = {
+      method: method.toUpperCase(),
+      url,
+    };
+    if (mergedHeaders) requestConfig.headers = mergedHeaders;
+    if (timeout) requestConfig.timeout = timeout;
+    if (fetchMode) requestConfig.fetch_mode = fetchMode;
+
+    const bodyPtr = bodyBuffer || Buffer.alloc(0);
+    const bodyLen = bodyBuffer ? bodyBuffer.length : 0;
+
+    const startTime = Date.now();
+    const responseHandle = this._lib.sensor_request_raw(
+      this._handle,
+      JSON.stringify(requestConfig),
+      bodyPtr,
+      bodyLen
+    );
+    const elapsed = Date.now() - startTime;
+    if (responseHandle < 0 || responseHandle === 0 || responseHandle === 0n) {
+      throw new HTTPCloakError("Request failed");
+    }
+    return parseRawResponse(this._lib, responseHandle, elapsed);
+  }
+
+  /**
+   * Perform an async GET request using native Go goroutines
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {Object} [options.cookies] - Cookies to send with this request
+   * @returns {Promise<Response>} Response object
+   */
+  get(url, options = {}) {
+    const { headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    const reqOptions = {};
+    if (mergedHeaders) {
+      reqOptions.headers = mergedHeaders;
+    }
+    if (fetchMode) {
+      reqOptions.fetch_mode = fetchMode;
+    }
+    if (timeout) {
+      reqOptions.timeout = timeout;
+    }
+    const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
+
+    const manager = getAsyncManager();
+    const { callbackId, promise } = manager.registerRequest(this._lib);
+
+    this._lib.sensor_get_async(this._handle, url, optionsJson, callbackId);
+
+    return promise;
+  }
+
+  /**
+   * Perform an async POST request using native Go goroutines
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {Object} [options.cookies] - Cookies to send with this request
+   * @returns {Promise<Response>} Response object
+   */
+  post(url, options = {}) {
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, fetchMode = null, timeout = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+
+    if (files !== null) {
+      const formData = (data !== null && typeof data === "object") ? data : null;
+      const multipart = encodeMultipart(formData, files);
+      body = multipart.body.toString("latin1");
+      mergedHeaders = mergedHeaders || {};
+      mergedHeaders["Content-Type"] = multipart.contentType;
+    }
+    else if (json !== null) {
+      body = JSON.stringify(json);
+      mergedHeaders = mergedHeaders || {};
+      if (!mergedHeaders["Content-Type"]) {
+        mergedHeaders["Content-Type"] = "application/json";
+      }
+    }
+    else if (data !== null && typeof data === "object") {
+      body = new URLSearchParams(data).toString();
+      mergedHeaders = mergedHeaders || {};
+      if (!mergedHeaders["Content-Type"]) {
+        mergedHeaders["Content-Type"] = "application/x-www-form-urlencoded";
+      }
+    }
+    else if (Buffer.isBuffer(body)) {
+      body = body.toString("utf8");
+    }
+
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    const reqOptions = {};
+    if (mergedHeaders) {
+      reqOptions.headers = mergedHeaders;
+    }
+    if (fetchMode) {
+      reqOptions.fetch_mode = fetchMode;
+    }
+    if (timeout) {
+      reqOptions.timeout = timeout;
+    }
+    const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
+
+    const manager = getAsyncManager();
+    const { callbackId, promise } = manager.registerRequest(this._lib);
+
+    this._lib.sensor_post_async(this._handle, url, body, optionsJson, callbackId);
+
+    return promise;
+  }
+
+  /**
+   * Perform an async custom HTTP request using native Go goroutines
+   * @param {string} method - HTTP method
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {Object} [options.cookies] - Cookies to send with this request
+   * @returns {Promise<Response>} Response object
+   */
+  request(method, url, options = {}) {
+    let { body = null, json = null, data = null, files = null, headers = null, params = null, cookies = null, auth = null, timeout = null, fetchMode = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+
+    if (files !== null) {
+      const formData = (data !== null && typeof data === "object") ? data : null;
+      const multipart = encodeMultipart(formData, files);
+      body = multipart.body.toString("latin1");
+      mergedHeaders = mergedHeaders || {};
+      mergedHeaders["Content-Type"] = multipart.contentType;
+    }
+    else if (json !== null) {
+      body = JSON.stringify(json);
+      mergedHeaders = mergedHeaders || {};
+      if (!mergedHeaders["Content-Type"]) {
+        mergedHeaders["Content-Type"] = "application/json";
+      }
+    }
+    else if (data !== null && typeof data === "object") {
+      body = new URLSearchParams(data).toString();
+      mergedHeaders = mergedHeaders || {};
+      if (!mergedHeaders["Content-Type"]) {
+        mergedHeaders["Content-Type"] = "application/x-www-form-urlencoded";
+      }
+    }
+    else if (Buffer.isBuffer(body)) {
+      body = body.toString("utf8");
+    }
+
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    const requestConfig = {
+      method: method.toUpperCase(),
+      url,
+    };
+    if (mergedHeaders) requestConfig.headers = mergedHeaders;
+    if (body) requestConfig.body = body;
+    if (timeout) requestConfig.timeout = timeout;
+    if (fetchMode) requestConfig.fetch_mode = fetchMode;
+
+    const manager = getAsyncManager();
+    const { callbackId, promise } = manager.registerRequest(this._lib);
+
+    this._lib.sensor_request_async(this._handle, JSON.stringify(requestConfig), callbackId);
+
+    return promise;
+  }
+
+  /**
+   * Perform an async PUT request
+   */
+  put(url, options = {}) {
+    return this.request("PUT", url, options);
+  }
+
+  /**
+   * Perform an async DELETE request
+   */
+  delete(url, options = {}) {
+    return this.request("DELETE", url, options);
+  }
+
+  /**
+   * Perform an async PATCH request
+   */
+  patch(url, options = {}) {
+    return this.request("PATCH", url, options);
+  }
+
+  /**
+   * Perform an async HEAD request
+   */
+  head(url, options = {}) {
+    return this.request("HEAD", url, options);
+  }
+
+  /**
+   * Perform an async OPTIONS request
+   */
+  options(url, options = {}) {
+    return this.request("OPTIONS", url, options);
+  }
+
+  /**
+   * Get all cookies with full metadata (domain, path, expiry, flags).
+   * @returns {Cookie[]} Array of Cookie objects
+   */
+  getCookiesDetailed() {
+    const resultPtr = this._lib.sensor_get_cookies(this._handle);
+    const result = resultToString(resultPtr);
+    if (result) {
+      const parsed = JSON.parse(result);
+      return parsed.map(c => new Cookie(c));
+    }
+    return [];
+  }
+
+  /**
+   * Get all cookies from the session with full metadata.
+   *
+   * Returns Cookie[] with domain/path/expiry/flags. For the older flat
+   * name->value object, build it yourself:
+   * `Object.fromEntries(session.getCookies().map(c => [c.name, c.value]))`.
+   * @returns {Cookie[]}
+   */
+  getCookies() {
+    return this.getCookiesDetailed();
+  }
+
+  /**
+   * Get a specific cookie by name with full metadata.
+   * @param {string} name - Cookie name
+   * @returns {Cookie|null} Cookie object or null if not found
+   */
+  getCookieDetailed(name) {
+    const cookies = this.getCookiesDetailed();
+    return cookies.find(c => c.name === name) || null;
+  }
+
+  /**
+   * Get a specific cookie by name.
+   *
+   * Returns a Cookie object (with domain/path/expiry/flags) or null. For just
+   * the string value: `const c = session.getCookie('foo'); const v = c?.value`.
+   * @param {string} name - Cookie name
+   * @returns {Cookie|null}
+   */
+  getCookie(name) {
+    return this.getCookieDetailed(name);
+  }
+
+  /**
+   * Set a cookie in the session
+   * @param {string} name - Cookie name
+   * @param {string} value - Cookie value
+   * @param {Object} [options] - Cookie options
+   * @param {string} [options.domain] - Cookie domain
+   * @param {string} [options.path] - Cookie path (default: "/")
+   * @param {boolean} [options.secure] - Secure flag
+   * @param {boolean} [options.httpOnly] - HttpOnly flag
+   * @param {string} [options.sameSite] - SameSite attribute (Strict, Lax, None)
+   * @param {number} [options.maxAge] - Max age in seconds (0 means not set)
+   * @param {string} [options.expires] - Expiration date (RFC1123 format)
+   */
+  setCookie(name, value, options = {}) {
+    const cookie = {
+      name,
+      value,
+      domain: options.domain || "",
+      path: options.path || "/",
+      secure: options.secure || false,
+      http_only: options.httpOnly || false,
+      same_site: options.sameSite || "",
+      max_age: options.maxAge || 0,
+      expires: options.expires || "",
+    };
+    this._lib.sensor_set_cookie(this._handle, JSON.stringify(cookie));
+  }
+
+  /**
+   * Delete a specific cookie by name
+   * @param {string} name - Cookie name to delete
+   * @param {string} [domain] - Domain to delete from (omit to delete from all domains)
+   */
+  deleteCookie(name, domain = "") {
+    this._lib.sensor_delete_cookie(this._handle, name, domain);
+  }
+
+  /**
+   * Clear all cookies from the session
+   */
+  clearCookies() {
+    this._lib.sensor_clear_cookies(this._handle);
+  }
+
+  /**
+   * Get cookies as a property.
+   * @deprecated This property will return Cookie[] with full metadata in a future release.
+   * @returns {Object} Cookies as key-value pairs
+   */
+  get cookies() {
+    return this.getCookies();
+  }
+
+  /**
+   * Change both TCP and UDP proxies for the session.
+   *
+   * This closes all existing connections and creates new ones through the new proxy.
+   * Use this for runtime proxy switching (e.g., rotating proxies).
+   *
+   * @param {string} proxyUrl - Proxy URL (e.g., "http://user:pass@host:port", "socks5://host:port")
+   *                            Pass empty string or null to switch to direct connection.
+   *
+   * Example:
+   *   const session = new sensor.Session({ proxy: "http://proxy1:8080" });
+   *   await session.get("https://example.com");  // Uses proxy1
+   *   session.setProxy("http://proxy2:8080");    // Switch to proxy2
+   *   await session.get("https://example.com");  // Uses proxy2
+   *   session.setProxy("");                      // Switch to direct connection
+   */
+  setProxy(proxyUrl) {
+    const url = proxyUrl || "";
+    this._lib.sensor_session_set_proxy(this._handle, url);
+  }
+
+  /**
+   * Change only the TCP proxy (for HTTP/1.1 and HTTP/2).
+   *
+   * Use this with setUdpProxy() for split proxy configuration where
+   * TCP and UDP traffic go through different proxies.
+   *
+   * @param {string} proxyUrl - Proxy URL for TCP traffic
+   *
+   * Example:
+   *   session.setTcpProxy("http://tcp-proxy:8080");
+   *   session.setUdpProxy("socks5://udp-proxy:1080");
+   */
+  setTcpProxy(proxyUrl) {
+    const url = proxyUrl || "";
+    this._lib.sensor_session_set_tcp_proxy(this._handle, url);
+  }
+
+  /**
+   * Change only the UDP proxy (for HTTP/3 via SOCKS5 or MASQUE).
+   *
+   * HTTP/3 requires either SOCKS5 (with UDP ASSOCIATE support) or MASQUE proxy.
+   *
+   * @param {string} proxyUrl - Proxy URL for UDP traffic (e.g., "socks5://host:port" or MASQUE URL)
+   *
+   * Example:
+   *   session.setUdpProxy("socks5://socks-proxy:1080");
+   */
+  setUdpProxy(proxyUrl) {
+    const url = proxyUrl || "";
+    this._lib.sensor_session_set_udp_proxy(this._handle, url);
+  }
+
+  /**
+   * Get the current proxy URL.
+   *
+   * @returns {string} Current proxy URL, or empty string if using direct connection
+   */
+  getProxy() {
+    const result = this._lib.sensor_session_get_proxy(this._handle);
+    return result || "";
+  }
+
+  /**
+   * Get the current TCP proxy URL.
+   *
+   * @returns {string} Current TCP proxy URL, or empty string if using direct connection
+   */
+  getTcpProxy() {
+    const result = this._lib.sensor_session_get_tcp_proxy(this._handle);
+    return result || "";
+  }
+
+  /**
+   * Get the current UDP proxy URL.
+   *
+   * @returns {string} Current UDP proxy URL, or empty string if using direct connection
+   */
+  getUdpProxy() {
+    const result = this._lib.sensor_session_get_udp_proxy(this._handle);
+    return result || "";
+  }
+
+  /**
+   * Set a custom header order for all requests.
+   *
+   * @param {string[]} order - Array of header names in desired order (lowercase).
+   *                           Pass empty array to reset to preset's default.
+   *
+   * Example:
+   *   session.setHeaderOrder([
+   *     "accept-language", "sec-ch-ua", "accept",
+   *     "sec-fetch-site", "sec-fetch-mode", "user-agent"
+   *   ]);
+   */
+  setHeaderOrder(order) {
+    const orderJson = JSON.stringify(order || []);
+    const result = this._lib.sensor_session_set_header_order(this._handle, orderJson);
+    if (result && result.includes("error")) {
+      const data = JSON.parse(result);
+      if (data.error) {
+        throw new Error(data.error);
+      }
+    }
+  }
+
+  /**
+   * Get the current header order.
+   *
+   * @returns {string[]} Array of header names in current order, or preset's default order
+   */
+  getHeaderOrder() {
+    const result = this._lib.sensor_session_get_header_order(this._handle);
+    if (result) {
+      return JSON.parse(result);
+    }
+    return [];
+  }
+
+  /**
+   * Set a session identifier for TLS cache key isolation.
+   *
+   * This is used when the session is registered with a LocalProxy to ensure
+   * TLS sessions are isolated per proxy/session configuration in distributed caches.
+   *
+   * @param {string} sessionId - Unique identifier for this session. Pass empty string to clear.
+   *
+   * Example:
+   *   session.setSessionIdentifier("user-123");
+   */
+  setSessionIdentifier(sessionId) {
+    this._lib.sensor_session_set_identifier(this._handle, sessionId || null);
+  }
+
+  /**
+   * Get the current proxy as a property.
+   */
+  get proxy() {
+    return this.getProxy();
+  }
+
+  /**
+   * Set the proxy via property assignment.
+   */
+  set proxy(proxyUrl) {
+    this.setProxy(proxyUrl);
+  }
+
+  /**
+   * Save session state (cookies, TLS sessions) to a file.
+   *
+   * This allows you to persist session state across program runs,
+   * including cookies and TLS session tickets for faster resumption.
+   *
+   * @param {string} path - Path to save the session file
+   *
+   * Example:
+   *   const session = new sensor.Session({ preset: "chrome-146" });
+   *   await session.get("https://example.com");  // Acquire cookies
+   *   session.save("session.json");
+   *
+   *   // Later, restore the session
+   *   const session = sensor.Session.load("session.json");
+   */
+  save(path) {
+    const result = this._lib.sensor_session_save(this._handle, path);
+    if (result) {
+      const data = JSON.parse(result);
+      if (data.error) {
+        throw new HTTPCloakError(data.error);
+      }
+    }
+  }
+
+  /**
+   * Export session state to JSON string.
+   *
+   * @returns {string} JSON string containing session state
+   *
+   * Example:
+   *   const sessionData = session.marshal();
+   *   // Store sessionData in database, cache, etc.
+   *
+   *   // Later, restore the session
+   *   const session = sensor.Session.unmarshal(sessionData);
+   */
+  marshal() {
+    const result = this._lib.sensor_session_marshal(this._handle);
+    if (!result) {
+      throw new HTTPCloakError("Failed to marshal session");
+    }
+
+    try {
+      const data = JSON.parse(result);
+      if (data && typeof data === "object" && data.error) {
+        throw new HTTPCloakError(data.error);
+      }
+    } catch (e) {
+      if (e instanceof HTTPCloakError) throw e;
+    }
+
+    return result;
+  }
+
+  /**
+   * Load a session from a file.
+   *
+   * This restores session state including cookies and TLS session tickets.
+   * The session uses the same preset that was used when it was saved.
+   *
+   * @param {string} path - Path to the session file
+   * @returns {Session} Restored Session object
+   *
+   * Example:
+   *   const session = sensor.Session.load("session.json");
+   *   const r = await session.get("https://example.com");  // Uses restored cookies
+   */
+  static load(path) {
+    const lib = getLib();
+    const handle = lib.sensor_session_load(path);
+
+    if (handle < 0 || handle === 0n) {
+      throw new HTTPCloakError(`Failed to load session from ${path}`);
+    }
+
+    const session = Object.create(Session.prototype);
+    session._lib = lib;
+    session._handle = handle;
+    session.headers = {};
+    session.auth = null;
+
+    return session;
+  }
+
+  /**
+   * Load a session from JSON string.
+   *
+   * @param {string} data - JSON string containing session state
+   * @returns {Session} Restored Session object
+   *
+   * Example:
+   *   // Retrieve sessionData from database, cache, etc.
+   *   const session = sensor.Session.unmarshal(sessionData);
+   */
+  static unmarshal(data) {
+    const lib = getLib();
+    const handle = lib.sensor_session_unmarshal(data);
+
+    if (handle < 0 || handle === 0n) {
+      throw new HTTPCloakError("Failed to unmarshal session");
+    }
+
+    const session = Object.create(Session.prototype);
+    session._lib = lib;
+    session._handle = handle;
+    session.headers = {};
+    session.auth = null;
+
+    return session;
+  }
+
+  /**
+   * Perform a streaming GET request.
+   *
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {Object} [options.params] - URL query parameters
+   * @param {Object} [options.headers] - Request headers
+   * @param {Object} [options.cookies] - Cookies to send
+   * @param {number} [options.timeout] - Request timeout in milliseconds
+   * @returns {StreamResponse} - Streaming response for chunked reading
+   *
+   * Example:
+   *   const stream = session.getStream("https://example.com/large-file.zip");
+   *   for await (const chunk of stream) {
+   *     file.write(chunk);
+   *   }
+   *   stream.close();
+   */
+  getStream(url, options = {}) {
+    const { params, headers, cookies, timeout } = options;
+
+    if (params) {
+      url = addParamsToUrl(url, params);
+    }
+
+    let mergedHeaders = { ...this.headers };
+    if (headers) {
+      mergedHeaders = { ...mergedHeaders, ...headers };
+    }
+    if (cookies) {
+      const cookieStr = Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join("; ");
+      mergedHeaders["Cookie"] = mergedHeaders["Cookie"]
+        ? `${mergedHeaders["Cookie"]}; ${cookieStr}`
+        : cookieStr;
+    }
+
+    const reqOptions = {};
+    if (Object.keys(mergedHeaders).length > 0) {
+      reqOptions.headers = mergedHeaders;
+    }
+    if (timeout) {
+      reqOptions.timeout = timeout;
+    }
+    const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
+
+    const streamHandle = this._lib.sensor_stream_get(this._handle, url, optionsJson);
+    if (streamHandle < 0) {
+      throw new HTTPCloakError("Failed to start streaming request");
+    }
+
+    const metadataStr = this._lib.sensor_stream_get_metadata(streamHandle);
+    if (!metadataStr) {
+      this._lib.sensor_stream_close(streamHandle);
+      throw new HTTPCloakError("Failed to get stream metadata");
+    }
+
+    const metadata = JSON.parse(metadataStr);
+    if (metadata.error) {
+      this._lib.sensor_stream_close(streamHandle);
+      throw new HTTPCloakError(metadata.error);
+    }
+
+    return new StreamResponse(streamHandle, this._lib, metadata);
+  }
+
+  /**
+   * Perform a streaming POST request.
+   *
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {string|Buffer|Object} [options.body] - Request body
+   * @param {Object} [options.json] - JSON body (will be serialized)
+   * @param {Object} [options.form] - Form data (will be URL-encoded)
+   * @param {Object} [options.params] - URL query parameters
+   * @param {Object} [options.headers] - Request headers
+   * @param {Object} [options.cookies] - Cookies to send
+   * @param {number} [options.timeout] - Request timeout in milliseconds
+   * @returns {StreamResponse} - Streaming response for chunked reading
+   */
+  postStream(url, options = {}) {
+    const { body: bodyOpt, json: jsonBody, form, params, headers, cookies, timeout } = options;
+
+    if (params) {
+      url = addParamsToUrl(url, params);
+    }
+
+    let mergedHeaders = { ...this.headers };
+    if (headers) {
+      mergedHeaders = { ...mergedHeaders, ...headers };
+    }
+
+    let body = null;
+    if (jsonBody) {
+      body = JSON.stringify(jsonBody);
+      mergedHeaders["Content-Type"] = mergedHeaders["Content-Type"] || "application/json";
+    } else if (form) {
+      body = Object.entries(form).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
+      mergedHeaders["Content-Type"] = mergedHeaders["Content-Type"] || "application/x-www-form-urlencoded";
+    } else if (bodyOpt) {
+      body = typeof bodyOpt === "string" ? bodyOpt : bodyOpt.toString();
+    }
+
+    if (cookies) {
+      const cookieStr = Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join("; ");
+      mergedHeaders["Cookie"] = mergedHeaders["Cookie"]
+        ? `${mergedHeaders["Cookie"]}; ${cookieStr}`
+        : cookieStr;
+    }
+
+    const reqOptions = {};
+    if (Object.keys(mergedHeaders).length > 0) {
+      reqOptions.headers = mergedHeaders;
+    }
+    if (timeout) {
+      reqOptions.timeout = timeout;
+    }
+    const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
+
+    const streamHandle = this._lib.sensor_stream_post(this._handle, url, body, optionsJson);
+    if (streamHandle < 0) {
+      throw new HTTPCloakError("Failed to start streaming request");
+    }
+
+    const metadataStr = this._lib.sensor_stream_get_metadata(streamHandle);
+    if (!metadataStr) {
+      this._lib.sensor_stream_close(streamHandle);
+      throw new HTTPCloakError("Failed to get stream metadata");
+    }
+
+    const metadata = JSON.parse(metadataStr);
+    if (metadata.error) {
+      this._lib.sensor_stream_close(streamHandle);
+      throw new HTTPCloakError(metadata.error);
+    }
+
+    return new StreamResponse(streamHandle, this._lib, metadata);
+  }
+
+  /**
+   * Perform a streaming request with any HTTP method.
+   *
+   * @param {string} method - HTTP method
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {string|Buffer} [options.body] - Request body
+   * @param {Object} [options.params] - URL query parameters
+   * @param {Object} [options.headers] - Request headers
+   * @param {Object} [options.cookies] - Cookies to send
+   * @param {number} [options.timeout] - Request timeout in seconds
+   * @returns {StreamResponse} - Streaming response for chunked reading
+   */
+  requestStream(method, url, options = {}) {
+    const { body, params, headers, cookies, timeout } = options;
+
+    if (params) {
+      url = addParamsToUrl(url, params);
+    }
+
+    let mergedHeaders = { ...this.headers };
+    if (headers) {
+      mergedHeaders = { ...mergedHeaders, ...headers };
+    }
+    if (cookies) {
+      const cookieStr = Object.entries(cookies).map(([k, v]) => `${k}=${v}`).join("; ");
+      mergedHeaders["Cookie"] = mergedHeaders["Cookie"]
+        ? `${mergedHeaders["Cookie"]}; ${cookieStr}`
+        : cookieStr;
+    }
+
+    const requestConfig = {
+      method: method.toUpperCase(),
+      url,
+    };
+    if (Object.keys(mergedHeaders).length > 0) {
+      requestConfig.headers = mergedHeaders;
+    }
+    if (body) {
+      requestConfig.body = typeof body === "string" ? body : body.toString();
+    }
+    if (timeout) {
+      requestConfig.timeout = timeout;
+    }
+
+    const streamHandle = this._lib.sensor_stream_request(this._handle, JSON.stringify(requestConfig));
+    if (streamHandle < 0) {
+      throw new HTTPCloakError("Failed to start streaming request");
+    }
+
+    const metadataStr = this._lib.sensor_stream_get_metadata(streamHandle);
+    if (!metadataStr) {
+      this._lib.sensor_stream_close(streamHandle);
+      throw new HTTPCloakError("Failed to get stream metadata");
+    }
+
+    const metadata = JSON.parse(metadataStr);
+    if (metadata.error) {
+      this._lib.sensor_stream_close(streamHandle);
+      throw new HTTPCloakError(metadata.error);
+    }
+
+    return new StreamResponse(streamHandle, this._lib, metadata);
+  }
+
+  /**
+   * Perform a fast GET request with zero-copy buffer transfer.
+   *
+   * This method bypasses JSON serialization and base64 encoding for the response body,
+   * copying data directly from Go's memory to a Node.js Buffer.
+   *
+   * Use this method for downloading large files when you need maximum throughput.
+   *
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {Object} [options.headers] - Custom headers
+   * @param {Object} [options.params] - Query parameters
+   * @param {Object} [options.cookies] - Cookies to send with this request
+   * @param {Array} [options.auth] - Basic auth [username, password]
+   * @returns {FastResponse} Fast response object with Buffer body
+   *
+   * Example:
+   *   const response = session.getFast("https://example.com/large-file.zip");
+   *   console.log(`Downloaded ${response.body.length} bytes`);
+   *   fs.writeFileSync("file.zip", response.body);
+   */
+  getFast(url, options = {}) {
+    const { headers = null, params = null, cookies = null, auth = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    const reqOptions = {};
+    if (mergedHeaders) {
+      reqOptions.headers = mergedHeaders;
+    }
+    const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
+
+    const startTime = Date.now();
+
+    const responseHandle = this._lib.sensor_get_raw(this._handle, url, optionsJson);
+    if (responseHandle === 0 || responseHandle === 0n) {
+      throw new HTTPCloakError("Failed to make request");
+    }
+
+    const bodyLen = this._lib.sensor_response_get_body_len(responseHandle);
+    if (bodyLen < 0) {
+      this._lib.sensor_response_free(responseHandle);
+      throw new HTTPCloakError("Failed to get response body length");
+    }
+
+    const pooledBuffer = _bufferPool.acquire(bodyLen);
+
+    const metadataStr = this._lib.sensor_response_finalize(responseHandle, pooledBuffer, bodyLen);
+    if (!metadataStr) {
+      _bufferPool.release(pooledBuffer);
+      throw new HTTPCloakError("Failed to finalize response");
+    }
+
+    const metadata = JSON.parse(metadataStr);
+    if (metadata.error) {
+      _bufferPool.release(pooledBuffer);
+      throw new HTTPCloakError(metadata.error);
+    }
+
+    const buffer = pooledBuffer.subarray(0, bodyLen);
+
+    const elapsed = Date.now() - startTime;
+    return new FastResponse(metadata, buffer, elapsed, pooledBuffer);
+  }
+
+  /**
+   * High-performance POST request optimized for large uploads.
+   *
+   * Uses binary buffer passing and response pooling for maximum throughput.
+   * Call response.release() when done to return buffers to pool.
+   *
+   * @param {string} url - Request URL
+   * @param {Object} [options] - Request options
+   * @param {Buffer} [options.body] - Request body as Buffer
+   * @param {Object} [options.headers] - Request headers
+   * @param {Object} [options.params] - Query parameters
+   * @param {Object} [options.cookies] - Cookies to send with this request
+   * @param {Array} [options.auth] - Basic auth [username, password]
+   * @returns {FastResponse} Fast response object with Buffer body
+   *
+   * Example:
+   *   const data = Buffer.alloc(10 * 1024 * 1024); // 10MB
+   *   const response = session.postFast("https://example.com/upload", { body: data });
+   *   console.log(`Uploaded, response: ${response.statusCode}`);
+   *   response.release();
+   */
+  postFast(url, options = {}) {
+    let { body = null, headers = null, params = null, cookies = null, auth = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    if (body === null) {
+      body = Buffer.alloc(0);
+    } else if (typeof body === "string") {
+      body = Buffer.from(body, "utf8");
+    } else if (!Buffer.isBuffer(body)) {
+      throw new HTTPCloakError("postFast body must be a Buffer or string");
+    }
+
+    const reqOptions = {};
+    if (mergedHeaders) {
+      reqOptions.headers = mergedHeaders;
+    }
+    const optionsJson = Object.keys(reqOptions).length > 0 ? JSON.stringify(reqOptions) : null;
+
+    const startTime = Date.now();
+
+    const responseHandle = this._lib.sensor_post_raw(this._handle, url, body, body.length, optionsJson);
+    if (responseHandle === 0 || responseHandle === 0n || responseHandle < 0) {
+      throw new HTTPCloakError("Failed to make POST request");
+    }
+
+    const bodyLen = this._lib.sensor_response_get_body_len(responseHandle);
+    if (bodyLen < 0) {
+      this._lib.sensor_response_free(responseHandle);
+      throw new HTTPCloakError("Failed to get response body length");
+    }
+
+    const pooledBuffer = _bufferPool.acquire(bodyLen);
+
+    const metadataStr = this._lib.sensor_response_finalize(responseHandle, pooledBuffer, bodyLen);
+    if (!metadataStr) {
+      _bufferPool.release(pooledBuffer);
+      throw new HTTPCloakError("Failed to finalize response");
+    }
+
+    const metadata = JSON.parse(metadataStr);
+    if (metadata.error) {
+      _bufferPool.release(pooledBuffer);
+      throw new HTTPCloakError(metadata.error);
+    }
+
+    const responseBuffer = pooledBuffer.subarray(0, bodyLen);
+
+    const elapsed = Date.now() - startTime;
+    return new FastResponse(metadata, responseBuffer, elapsed, pooledBuffer);
+  }
+
+  /**
+   * Perform a high-performance generic HTTP request with zero-copy buffer transfer.
+   *
+   * This method is optimized for maximum speed by:
+   * - Using pre-allocated buffer pools (no per-request allocation)
+   * - Returning Buffer views instead of copying (zero-copy)
+   * - Using combined finalize FFI call (1 instead of 3)
+   *
+   * @param {string} method - HTTP method (GET, POST, PUT, DELETE, PATCH, etc.)
+   * @param {string} url - Request URL
+   * @param {Object} [options={}] - Request options
+   * @param {Buffer|string|null} [options.body] - Request body
+   * @param {Object} [options.headers] - Request headers
+   * @param {Object} [options.params] - URL query parameters
+   * @param {Object} [options.cookies] - Cookies to send
+   * @param {Array} [options.auth] - Basic auth [username, password]
+   * @param {number} [options.timeout] - Request timeout in milliseconds
+   * @returns {FastResponse} Fast response object with Buffer body
+   *
+   * Example:
+   *   const response = session.requestFast("PUT", "https://api.example.com/resource", {
+   *     body: JSON.stringify({ key: "value" }),
+   *     headers: { "Content-Type": "application/json" }
+   *   });
+   *   console.log(`Status: ${response.statusCode}`);
+   *   response.release();
+   */
+  requestFast(method, url, options = {}) {
+    let { body = null, headers = null, params = null, cookies = null, auth = null, timeout = null } = options;
+
+    url = addParamsToUrl(url, params);
+    let mergedHeaders = this._mergeHeaders(headers);
+    const effectiveAuth = auth !== null ? auth : this.auth;
+    mergedHeaders = applyAuth(mergedHeaders, effectiveAuth);
+    mergedHeaders = this._applyCookies(mergedHeaders, cookies);
+
+    if (body !== null) {
+      if (typeof body === "string") {
+        body = Buffer.from(body, "utf8");
+      } else if (!Buffer.isBuffer(body)) {
+        throw new HTTPCloakError("requestFast body must be a Buffer or string");
+      }
+    }
+
+    const requestConfig = {
+      method: method.toUpperCase(),
+      url: url,
+    };
+    if (mergedHeaders && Object.keys(mergedHeaders).length > 0) {
+      requestConfig.headers = mergedHeaders;
+    }
+    if (timeout) {
+      requestConfig.timeout = timeout;
+    }
+    const requestJson = JSON.stringify(requestConfig);
+
+    const startTime = Date.now();
+
+    const responseHandle = this._lib.sensor_request_raw(
+      this._handle,
+      requestJson,
+      body || Buffer.alloc(0),
+      body ? body.length : 0
+    );
+
+    if (responseHandle === 0 || responseHandle === 0n || responseHandle < 0) {
+      throw new HTTPCloakError("Failed to make request");
+    }
+
+    const bodyLen = this._lib.sensor_response_get_body_len(responseHandle);
+    if (bodyLen < 0) {
+      this._lib.sensor_response_free(responseHandle);
+      throw new HTTPCloakError("Failed to get response body length");
+    }
+
+    const pooledBuffer = _bufferPool.acquire(bodyLen);
+
+    const metadataStr = this._lib.sensor_response_finalize(responseHandle, pooledBuffer, bodyLen);
+    if (!metadataStr) {
+      _bufferPool.release(pooledBuffer);
+      throw new HTTPCloakError("Failed to finalize response");
+    }
+
+    const metadata = JSON.parse(metadataStr);
+    if (metadata.error) {
+      _bufferPool.release(pooledBuffer);
+      throw new HTTPCloakError(metadata.error);
+    }
+
+    const responseBuffer = pooledBuffer.subarray(0, bodyLen);
+
+    const elapsed = Date.now() - startTime;
+    return new FastResponse(metadata, responseBuffer, elapsed, pooledBuffer);
+  }
+
+  /**
+   * Perform a high-performance PUT request with zero-copy buffer transfer.
+   * @param {string} url - Request URL
+   * @param {Object} [options={}] - Request options (body, headers, params, cookies, auth, timeout)
+   * @returns {FastResponse} Fast response object with Buffer body
+   */
+  putFast(url, options = {}) {
+    return this.requestFast("PUT", url, options);
+  }
+
+  /**
+   * Perform a high-performance DELETE request with zero-copy buffer transfer.
+   * @param {string} url - Request URL
+   * @param {Object} [options={}] - Request options (headers, params, cookies, auth, timeout)
+   * @returns {FastResponse} Fast response object with Buffer body
+   */
+  deleteFast(url, options = {}) {
+    return this.requestFast("DELETE", url, options);
+  }
+
+  /**
+   * Perform a high-performance PATCH request with zero-copy buffer transfer.
+   * @param {string} url - Request URL
+   * @param {Object} [options={}] - Request options (body, headers, params, cookies, auth, timeout)
+   * @returns {FastResponse} Fast response object with Buffer body
+   */
+  patchFast(url, options = {}) {
+    return this.requestFast("PATCH", url, options);
+  }
+}
+
+let _defaultSession = null;
+let _defaultConfig = {};
+
+/**
+ * Configure defaults for module-level functions
+ * @param {Object} options - Configuration options
+ * @param {string} [options.preset="chrome-146"] - Browser preset
+ * @param {Object} [options.headers] - Default headers
+ * @param {Array} [options.auth] - Default basic auth [username, password]
+ * @param {string} [options.proxy] - Proxy URL
+ * @param {number} [options.timeout=30] - Default timeout in seconds
+ * @param {string} [options.httpVersion="auto"] - HTTP version: "auto", "h1", "h2", "h3"
+ * @param {boolean} [options.verify=true] - SSL certificate verification
+ * @param {boolean} [options.allowRedirects=true] - Follow redirects
+ * @param {number} [options.maxRedirects=10] - Maximum number of redirects to follow
+ * @param {number} [options.retry=0] - Number of retries on failure (default 0 = no retries; set positive to enable. See issue #57)
+ * @param {number[]} [options.retryOnStatus] - Status codes to retry on (only consulted when retry > 0)
+ */
+function configure(options = {}) {
+  const {
+    preset = "chrome-146",
+    headers = null,
+    auth = null,
+    proxy = null,
+    timeout = 30,
+    httpVersion = "auto",
+    verify = true,
+    allowRedirects = true,
+    maxRedirects = 10,
+    retry = 0,
+    retryOnStatus = null,
+  } = options;
+
+  if (_defaultSession) {
+    _defaultSession.close();
+    _defaultSession = null;
+  }
+
+  let finalHeaders = applyAuth(headers, auth) || {};
+
+  _defaultConfig = {
+    preset,
+    proxy,
+    timeout,
+    httpVersion,
+    verify,
+    allowRedirects,
+    maxRedirects,
+    retry,
+    retryOnStatus,
+    headers: finalHeaders,
+  };
+
+  _defaultSession = new Session({
+    preset,
+    proxy,
+    timeout,
+    httpVersion,
+    verify,
+    allowRedirects,
+    maxRedirects,
+    retry,
+    retryOnStatus,
+  });
+  if (Object.keys(finalHeaders).length > 0) {
+    Object.assign(_defaultSession.headers, finalHeaders);
+  }
+}
+
+/**
+ * Get or create the default session
+ */
+function _getDefaultSession() {
+  if (!_defaultSession) {
+    const preset = _defaultConfig.preset || "chrome-146";
+    const proxy = _defaultConfig.proxy || null;
+    const timeout = _defaultConfig.timeout || 30;
+    const httpVersion = _defaultConfig.httpVersion || "auto";
+    const verify = _defaultConfig.verify !== undefined ? _defaultConfig.verify : true;
+    const allowRedirects = _defaultConfig.allowRedirects !== undefined ? _defaultConfig.allowRedirects : true;
+    const maxRedirects = _defaultConfig.maxRedirects || 10;
+    const retry = _defaultConfig.retry !== undefined ? _defaultConfig.retry : 0;
+    const retryOnStatus = _defaultConfig.retryOnStatus || null;
+    const headers = _defaultConfig.headers || {};
+
+    _defaultSession = new Session({
+      preset,
+      proxy,
+      timeout,
+      httpVersion,
+      verify,
+      allowRedirects,
+      maxRedirects,
+      retry,
+      retryOnStatus,
+    });
+    if (Object.keys(headers).length > 0) {
+      Object.assign(_defaultSession.headers, headers);
+    }
+  }
+  return _defaultSession;
+}
+
+/**
+ * Perform a GET request
+ * @param {string} url - Request URL
+ * @param {Object} [options] - Request options
+ * @returns {Promise<Response>}
+ */
+function get(url, options = {}) {
+  return _getDefaultSession().get(url, options);
+}
+
+/**
+ * Perform a POST request
+ * @param {string} url - Request URL
+ * @param {Object} [options] - Request options
+ * @returns {Promise<Response>}
+ */
+function post(url, options = {}) {
+  return _getDefaultSession().post(url, options);
+}
+
+/**
+ * Perform a PUT request
+ */
+function put(url, options = {}) {
+  return _getDefaultSession().put(url, options);
+}
+
+/**
+ * Perform a DELETE request
+ */
+function del(url, options = {}) {
+  return _getDefaultSession().delete(url, options);
+}
+
+/**
+ * Perform a PATCH request
+ */
+function patch(url, options = {}) {
+  return _getDefaultSession().patch(url, options);
+}
+
+/**
+ * Perform a HEAD request
+ */
+function head(url, options = {}) {
+  return _getDefaultSession().head(url, options);
+}
+
+/**
+ * Perform an OPTIONS request
+ */
+function options(url, opts = {}) {
+  return _getDefaultSession().options(url, opts);
+}
+
+/**
+ * Perform a custom HTTP request
+ */
+function request(method, url, options = {}) {
+  return _getDefaultSession().request(method, url, options);
+}
+
+/**
+ * Local HTTP proxy server that forwards requests through sensor with TLS fingerprinting.
+ * Use this to transparently apply fingerprinting to any HTTP client (e.g., Undici, fetch).
+ *
+ * Supports per-request proxy rotation via X-Upstream-Proxy header.
+ * Supports per-request session routing via X-HTTPCloak-Session header.
+ *
+ * IMPORTANT: For distributed session caching to work with X-HTTPCloak-Session header,
+ * you MUST register the session with the proxy using registerSession() first.
+ * Without registration, cache callbacks will not be triggered for that session.
+ *
+ * @example
+ * const proxy = new LocalProxy({ preset: "chrome-146", tlsOnly: true });
+ * console.log(`Proxy running on ${proxy.proxyUrl}`);
+ *
+ * // Use with any HTTP client pointing to the proxy
+ * // Pass X-Upstream-Proxy header to rotate proxies per-request
+ *
+ * proxy.close();
+ *
+ * @example
+ * // Using with distributed session cache
+ * const proxy = new LocalProxy({ port: 8888 });
+ * const session = new Session({ preset: 'chrome-143' });
+ *
+ * // Configure distributed cache (e.g., Redis)
+ * sensor.configureSessionCache({
+ *   get: async (key) => await redis.get(key),
+ *   put: async (key, value, ttl) => { await redis.setex(key, ttl, value); return 0; },
+ * });
+ *
+ * // REQUIRED: Register session with proxy for cache callbacks to work
+ * proxy.registerSession('session-1', session);
+ *
+ * // Now requests with X-HTTPCloak-Session: session-1 will trigger cache callbacks
+ */
+class LocalProxy {
+  /**
+   * Create and start a local HTTP proxy server.
+   * @param {Object} options - Proxy configuration options
+   * @param {number} [options.port=0] - Port to listen on (0 = auto-select)
+   * @param {string} [options.preset="chrome-146"] - Browser fingerprint preset
+   * @param {number} [options.timeout=30] - Request timeout in seconds
+   * @param {number} [options.maxConnections=1000] - Maximum concurrent connections
+   * @param {string} [options.tcpProxy] - Default upstream TCP proxy URL
+   * @param {string} [options.udpProxy] - Default upstream UDP proxy URL
+   * @param {boolean} [options.tlsOnly=false] - TLS-only mode: skip preset HTTP headers, only apply TLS fingerprint
+   */
+  constructor(options = {}) {
+    const {
+      port = 0,
+      preset = "chrome-146",
+      timeout = 30,
+      maxConnections = 1000,
+      tcpProxy = null,
+      udpProxy = null,
+      tlsOnly = false,
+    } = options;
+
+    this._lib = getLib();
+
+    const config = {
+      port,
+      preset,
+      timeout,
+      max_connections: maxConnections,
+    };
+    if (tcpProxy) config.tcp_proxy = tcpProxy;
+    if (udpProxy) config.udp_proxy = udpProxy;
+    if (tlsOnly) config.tls_only = true;
+
+    const configJson = JSON.stringify(config);
+    this._handle = this._lib.sensor_local_proxy_start(configJson);
+
+    if (this._handle < 0) {
+      throw new HTTPCloakError("Failed to start local proxy");
+    }
+  }
+
+  /**
+   * Get the port the proxy is listening on.
+   * @returns {number}
+   */
+  get port() {
+    return this._lib.sensor_local_proxy_get_port(this._handle);
+  }
+
+  /**
+   * Check if the proxy is currently running.
+   * @returns {boolean}
+   */
+  get isRunning() {
+    return this._lib.sensor_local_proxy_is_running(this._handle) !== 0;
+  }
+
+  /**
+   * Get the proxy URL for use with HTTP clients.
+   * Uses 127.0.0.1 instead of localhost to avoid IPv6 resolution issues.
+   * @returns {string}
+   */
+  get proxyUrl() {
+    return `http://127.0.0.1:${this.port}`;
+  }
+
+  /**
+   * Get proxy statistics.
+   * @returns {Object} Statistics including running status, active connections, total requests
+   */
+  getStats() {
+    const resultPtr = this._lib.sensor_local_proxy_get_stats(this._handle);
+    const result = resultToString(resultPtr);
+    if (result) {
+      return JSON.parse(result);
+    }
+    return {};
+  }
+
+  /**
+   * Register a session with an ID for use with X-HTTPCloak-Session header.
+   * This allows per-request session routing through the proxy.
+   *
+   * @param {string} sessionId - Unique identifier for the session
+   * @param {Session} session - The session to register
+   * @throws {HTTPCloakError} If registration fails
+   */
+  registerSession(sessionId, session) {
+    if (!session || !session._handle) {
+      throw new HTTPCloakError("Invalid session");
+    }
+    const resultPtr = this._lib.sensor_local_proxy_register_session(
+      this._handle,
+      sessionId,
+      session._handle
+    );
+    const result = resultToString(resultPtr);
+    if (result) {
+      const data = JSON.parse(result);
+      if (data.error) {
+        throw new HTTPCloakError(data.error);
+      }
+    }
+  }
+
+  /**
+   * Unregister a session by ID.
+   * After unregistering, the session ID can no longer be used with X-HTTPCloak-Session header.
+   *
+   * @param {string} sessionId - The session ID to unregister
+   * @returns {boolean} True if the session was found and unregistered, false otherwise
+   */
+  unregisterSession(sessionId) {
+    const result = this._lib.sensor_local_proxy_unregister_session(
+      this._handle,
+      sessionId
+    );
+    return result === 1;
+  }
+
+  /**
+   * Stop the local proxy server.
+   */
+  close() {
+    if (this._handle >= 0) {
+      this._lib.sensor_local_proxy_stop(this._handle);
+      this._handle = -1;
+    }
+  }
+}
+
+let _sessionCacheBackend = null;
+let _sessionCacheCallbackPtrs = {};
+
+/**
+ * Distributed TLS session cache backend for sharing sessions across instances.
+ *
+ * This enables TLS session resumption across distributed sensor instances
+ * by storing session tickets in an external cache like Redis or Memcached.
+ *
+ * Example with Redis:
+ * ```javascript
+ * const Redis = require('ioredis');
+ * const sensor = require('sensor');
+ *
+ * const redis = new Redis();
+ *
+ * const cache = new sensor.SessionCacheBackend({
+ *   get: (key) => redis.get(key),
+ *   put: (key, value, ttlSeconds) => {
+ *     redis.setex(key, ttlSeconds, value);
+ *     return 0;
+ *   },
+ *   delete: (key) => {
+ *     redis.del(key);
+ *     return 0;
+ *   },
+ *   onError: (operation, key, error) => {
+ *     console.error(`Cache error: ${operation} on ${key}: ${error}`);
+ *   }
+ * });
+ *
+ * cache.register();
+ *
+ * // Now all Session and LocalProxy instances will use this cache
+ * const session = new sensor.Session({ preset: 'chrome-143' });
+ * await session.get('https://example.com');  // Session will be cached!
+ * ```
+ *
+ * The cache is used for:
+ * - TLS session tickets (key format: sensor:sessions:{preset}:{protocol}:{host}:{port})
+ * - ECH configs for HTTP/3 (key format: sensor:ech:{preset}:{host}:{port})
+ *
+ * Session data is JSON with fields: ticket, state, created_at
+ * ECH config data is base64-encoded binary
+ */
+class SessionCacheBackend {
+  /**
+   * Create a session cache backend.
+   *
+   * Supports both synchronous and asynchronous callbacks. Async mode is automatically
+   * detected when any callback is an async function or returns a Promise.
+   *
+   * @param {Object} options Cache configuration
+   * @param {Function} [options.get] Get session data: (key: string) => string|null|Promise<string|null>
+   * @param {Function} [options.put] Store session: (key: string, value: string, ttlSeconds: number) => number|Promise<number>
+   * @param {Function} [options.delete] Delete session: (key: string) => number|Promise<number>
+   * @param {Function} [options.getEch] Get ECH config: (key: string) => string|null|Promise<string|null>
+   * @param {Function} [options.putEch] Store ECH: (key: string, value: string, ttlSeconds: number) => number|Promise<number>
+   * @param {Function} [options.onError] Error callback: (operation: string, key: string, error: string) => void
+   * @param {boolean} [options.async] Force async mode (auto-detected if not specified)
+   */
+  constructor(options = {}) {
+    this._get = options.get || null;
+    this._put = options.put || null;
+    this._delete = options.delete || null;
+    this._getEch = options.getEch || null;
+    this._putEch = options.putEch || null;
+    this._onError = options.onError || null;
+    this._registered = false;
+
+    const isAsyncFn = (fn) => !!(fn && (fn.constructor.name === 'AsyncFunction' || fn[Symbol.toStringTag] === 'AsyncFunction'));
+    this._asyncMode = options.async !== undefined ? options.async : (
+      isAsyncFn(this._get) || isAsyncFn(this._put) || isAsyncFn(this._delete) ||
+      isAsyncFn(this._getEch) || isAsyncFn(this._putEch)
+    );
+  }
+
+  /**
+   * Check if this backend is running in async mode.
+   * @returns {boolean}
+   */
+  get isAsync() {
+    return this._asyncMode;
+  }
+
+  /**
+   * Register this cache backend globally.
+   *
+   * After registration, all new Session and LocalProxy instances will use
+   * this cache for TLS session storage.
+   */
+  register() {
+    const lib = getLib();
+
+    _sessionCacheCallbackPtrs = {};
+
+    const errorFn = this._onError;
+    _sessionCacheCallbackPtrs.error = koffi.register((operation, key, error) => {
+      if (!errorFn) return;
+      try {
+        errorFn(operation, key, error);
+      } catch (e) {
+      }
+    }, koffi.pointer(SessionCacheErrorProto));
+
+    if (this._asyncMode) {
+      this._registerAsync(lib);
+    } else {
+      this._registerSync(lib);
+    }
+
+    _sessionCacheBackend = this;
+    this._registered = true;
+  }
+
+  /**
+   * Register synchronous callbacks (for in-memory Map, etc.)
+   * @private
+   */
+  _registerSync(lib) {
+    const getFn = this._get;
+    _sessionCacheCallbackPtrs.get = koffi.register((key) => {
+      if (!getFn) return null;
+      try {
+        const result = getFn(key);
+        if (result && typeof result.then === 'function') {
+          console.warn('SessionCacheBackend: Detected async callback in sync mode. Use async: true option.');
+          return null;
+        }
+        return result || null;
+      } catch (e) {
+        return null;
+      }
+    }, koffi.pointer(SessionCacheGetProto));
+
+    const putFn = this._put;
+    _sessionCacheCallbackPtrs.put = koffi.register((key, value, ttlSeconds) => {
+      if (!putFn) return 0;
+      try {
+        const result = putFn(key, value, Number(ttlSeconds));
+        if (result && typeof result.then === 'function') {
+          console.warn('SessionCacheBackend: Detected async callback in sync mode. Use async: true option.');
+          return 0;
+        }
+        return result || 0;
+      } catch (e) {
+        return -1;
+      }
+    }, koffi.pointer(SessionCachePutProto));
+
+    const deleteFn = this._delete;
+    _sessionCacheCallbackPtrs.delete = koffi.register((key) => {
+      if (!deleteFn) return 0;
+      try {
+        const result = deleteFn(key);
+        if (result && typeof result.then === 'function') {
+          console.warn('SessionCacheBackend: Detected async callback in sync mode. Use async: true option.');
+          return 0;
+        }
+        return result || 0;
+      } catch (e) {
+        return -1;
+      }
+    }, koffi.pointer(SessionCacheDeleteProto));
+
+    const getEchFn = this._getEch;
+    _sessionCacheCallbackPtrs.getEch = koffi.register((key) => {
+      if (!getEchFn) return null;
+      try {
+        const result = getEchFn(key);
+        if (result && typeof result.then === 'function') {
+          console.warn('SessionCacheBackend: Detected async callback in sync mode. Use async: true option.');
+          return null;
+        }
+        return result || null;
+      } catch (e) {
+        return null;
+      }
+    }, koffi.pointer(EchCacheGetProto));
+
+    const putEchFn = this._putEch;
+    _sessionCacheCallbackPtrs.putEch = koffi.register((key, value, ttlSeconds) => {
+      if (!putEchFn) return 0;
+      try {
+        const result = putEchFn(key, value, Number(ttlSeconds));
+        if (result && typeof result.then === 'function') {
+          console.warn('SessionCacheBackend: Detected async callback in sync mode. Use async: true option.');
+          return 0;
+        }
+        return result || 0;
+      } catch (e) {
+        return -1;
+      }
+    }, koffi.pointer(EchCachePutProto));
+
+    lib.sensor_set_session_cache_callbacks(
+      _sessionCacheCallbackPtrs.get,
+      _sessionCacheCallbackPtrs.put,
+      _sessionCacheCallbackPtrs.delete,
+      _sessionCacheCallbackPtrs.getEch,
+      _sessionCacheCallbackPtrs.putEch,
+      _sessionCacheCallbackPtrs.error
+    );
+  }
+
+  /**
+   * Register asynchronous callbacks (for Redis, database, etc.)
+   * Go will call our callback with a request ID, we process async,
+   * then call back into Go with the result.
+   * @private
+   */
+  _registerAsync(lib) {
+    const getFn = this._get;
+    _sessionCacheCallbackPtrs.get = koffi.register((requestId, key) => {
+      if (!getFn) {
+        lib.sensor_async_cache_get_result(requestId, null);
+        return;
+      }
+      Promise.resolve()
+        .then(() => getFn(key))
+        .then((result) => {
+          lib.sensor_async_cache_get_result(requestId, result || null);
+        })
+        .catch(() => {
+          lib.sensor_async_cache_get_result(requestId, null);
+        });
+    }, koffi.pointer(AsyncCacheGetProto));
+
+    const putFn = this._put;
+    _sessionCacheCallbackPtrs.put = koffi.register((requestId, key, value, ttlSeconds) => {
+      if (!putFn) {
+        lib.sensor_async_cache_op_result(requestId, 0);
+        return;
+      }
+      Promise.resolve()
+        .then(() => putFn(key, value, Number(ttlSeconds)))
+        .then((result) => {
+          lib.sensor_async_cache_op_result(requestId, result || 0);
+        })
+        .catch(() => {
+          lib.sensor_async_cache_op_result(requestId, -1);
+        });
+    }, koffi.pointer(AsyncCachePutProto));
+
+    const deleteFn = this._delete;
+    _sessionCacheCallbackPtrs.delete = koffi.register((requestId, key) => {
+      if (!deleteFn) {
+        lib.sensor_async_cache_op_result(requestId, 0);
+        return;
+      }
+      Promise.resolve()
+        .then(() => deleteFn(key))
+        .then((result) => {
+          lib.sensor_async_cache_op_result(requestId, result || 0);
+        })
+        .catch(() => {
+          lib.sensor_async_cache_op_result(requestId, -1);
+        });
+    }, koffi.pointer(AsyncCacheDeleteProto));
+
+    const getEchFn = this._getEch;
+    _sessionCacheCallbackPtrs.getEch = koffi.register((requestId, key) => {
+      if (!getEchFn) {
+        lib.sensor_async_cache_get_result(requestId, null);
+        return;
+      }
+      Promise.resolve()
+        .then(() => getEchFn(key))
+        .then((result) => {
+          lib.sensor_async_cache_get_result(requestId, result || null);
+        })
+        .catch(() => {
+          lib.sensor_async_cache_get_result(requestId, null);
+        });
+    }, koffi.pointer(AsyncEchGetProto));
+
+    const putEchFn = this._putEch;
+    _sessionCacheCallbackPtrs.putEch = koffi.register((requestId, key, value, ttlSeconds) => {
+      if (!putEchFn) {
+        lib.sensor_async_cache_op_result(requestId, 0);
+        return;
+      }
+      Promise.resolve()
+        .then(() => putEchFn(key, value, Number(ttlSeconds)))
+        .then((result) => {
+          lib.sensor_async_cache_op_result(requestId, result || 0);
+        })
+        .catch(() => {
+          lib.sensor_async_cache_op_result(requestId, -1);
+        });
+    }, koffi.pointer(AsyncEchPutProto));
+
+    lib.sensor_set_async_session_cache_callbacks(
+      _sessionCacheCallbackPtrs.get,
+      _sessionCacheCallbackPtrs.put,
+      _sessionCacheCallbackPtrs.delete,
+      _sessionCacheCallbackPtrs.getEch,
+      _sessionCacheCallbackPtrs.putEch,
+      _sessionCacheCallbackPtrs.error
+    );
+  }
+
+  /**
+   * Unregister this cache backend.
+   *
+   * After unregistration, new sessions will not use distributed caching.
+   */
+  unregister() {
+    if (!this._registered) {
+      return;
+    }
+
+    const lib = getLib();
+    lib.sensor_clear_session_cache_callbacks();
+
+    _sessionCacheBackend = null;
+    _sessionCacheCallbackPtrs = {};
+    this._registered = false;
+  }
+}
+
+/**
+ * Configure a distributed session cache backend.
+ *
+ * This is a convenience function that creates and registers a SessionCacheBackend.
+ * Supports both synchronous and asynchronous callbacks (auto-detected).
+ *
+ * @param {Object} options Cache configuration (same as SessionCacheBackend constructor)
+ * @returns {SessionCacheBackend} The registered backend
+ *
+ * Example using in-memory Map (sync):
+ * ```javascript
+ * const sensor = require('sensor');
+ *
+ * const cache = new Map();
+ *
+ * sensor.configureSessionCache({
+ *   get: (key) => cache.get(key) || null,
+ *   put: (key, value, ttl) => { cache.set(key, value); return 0; },
+ *   delete: (key) => { cache.delete(key); return 0; },
+ * });
+ * ```
+ *
+ * Example using Redis (async):
+ * ```javascript
+ * const Redis = require('ioredis');
+ * const sensor = require('sensor');
+ *
+ * const redis = new Redis();
+ *
+ * sensor.configureSessionCache({
+ *   get: async (key) => await redis.get(key),
+ *   put: async (key, value, ttl) => { await redis.setex(key, ttl, value); return 0; },
+ *   delete: async (key) => { await redis.del(key); return 0; },
+ * });
+ *
+ * // Async callbacks are automatically detected and handled properly
+ * const session = new sensor.Session();
+ * await session.get('https://example.com');
+ * ```
+ */
+function configureSessionCache(options) {
+  const backend = new SessionCacheBackend(options);
+  backend.register();
+  return backend;
+}
+
+/**
+ * Clear the distributed session cache backend.
+ *
+ * After calling this, new sessions will not use distributed caching.
+ */
+function clearSessionCache() {
+  const lib = getLib();
+  lib.sensor_clear_session_cache_callbacks();
+  _sessionCacheBackend = null;
+  _sessionCacheCallbackPtrs = {};
+}
+
+/**
+ * Read a C string from a void pointer and free the native memory.
+ * Returns null if the pointer is null/0.
+ * @param {*} ptr - Native void pointer
+ * @returns {string|null}
+ */
+function readAndFreeString(ptr) {
+  if (!ptr) return null;
+  const lib = getLib();
+  try {
+    return koffi.decode(ptr, "char", -1);
+  } finally {
+    lib.sensor_free_string(ptr);
+  }
+}
+
+/**
+ * Load a custom preset from a JSON file and register it.
+ * @param {string} filePath - Path to the preset JSON file
+ * @returns {string} The registered preset name
+ */
+function loadPreset(filePath) {
+  const lib = getLib();
+  const result = readAndFreeString(lib.sensor_preset_load_file(filePath));
+  if (!result) {
+    throw new HTTPCloakError("Failed to load preset from file");
+  }
+  const data = JSON.parse(result);
+  if (data.error) {
+    throw new HTTPCloakError(data.error);
+  }
+  return data.name;
+}
+
+/**
+ * Load a custom preset from a JSON string and register it.
+ * @param {string} jsonData - JSON string defining the preset
+ * @returns {string} The registered preset name
+ */
+function loadPresetFromJSON(jsonData) {
+  const lib = getLib();
+  const result = readAndFreeString(lib.sensor_preset_load_json(jsonData));
+  if (!result) {
+    throw new HTTPCloakError("Failed to load preset from JSON");
+  }
+  const data = JSON.parse(result);
+  if (data.error) {
+    throw new HTTPCloakError(data.error);
+  }
+  return data.name;
+}
+
+/**
+ * Unregister a custom preset by name.
+ * @param {string} name - The preset name to unregister
+ */
+function unregisterPreset(name) {
+  const lib = getLib();
+  lib.sensor_preset_unregister(name);
+}
+
+/**
+ * Return a fully-resolved JSON document for the given preset.
+ *
+ * The output flattens any inheritance chain and resolves H2/H3 defaults
+ * (Chrome unless the preset overrides) into explicit values, so the
+ * result is suitable for saving, editing, and reloading via
+ * loadPresetFromJSON. Two consecutive calls return byte-identical JSON.
+ *
+ * @param {string} name - The preset name (built-in or custom-registered).
+ * @returns {string} JSON string of the form {"version":1,"preset":{...}}.
+ * @throws {HTTPCloakError} If the preset is not registered or references
+ *   an unknown utls ClientHelloID.
+ */
+function describePreset(name) {
+  const lib = getLib();
+  const result = lib.sensor_describe_preset(name);
+  if (!result) {
+    throw new HTTPCloakError(`Failed to describe preset: ${name}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(result);
+  } catch (err) {
+    throw new HTTPCloakError(`Invalid describe_preset response: ${err.message}`);
+  }
+  if (parsed && parsed.error && !parsed.preset) {
+    throw new HTTPCloakError(parsed.error);
+  }
+  return result;
+}
+
+/**
+ * A pool of custom fingerprint presets for rotation.
+ *
+ * Pools load multiple presets from a single JSON file and provide
+ * round-robin or random selection. All presets are auto-registered
+ * on construction, so you can pass the returned name directly to
+ * Session({ preset: name }).
+ */
+class PresetPool {
+  /**
+   * Load a preset pool from a JSON file.
+   * @param {string} filePath - Path to the pool JSON file
+   */
+  constructor(filePath) {
+    this._lib = getLib();
+    const result = readAndFreeString(this._lib.sensor_pool_load_file(filePath));
+    if (!result) {
+      throw new HTTPCloakError(`Failed to load preset pool from file: ${filePath}`);
+    }
+    const data = JSON.parse(result);
+    if (data.error) {
+      throw new HTTPCloakError(data.error);
+    }
+    this._handle = BigInt(data.handle);
+  }
+
+  /**
+   * Load a preset pool from a JSON string.
+   * @param {string} jsonData - JSON string defining the pool
+   * @returns {PresetPool}
+   */
+  static fromJSON(jsonData) {
+    const pool = Object.create(PresetPool.prototype);
+    pool._lib = getLib();
+    const result = readAndFreeString(pool._lib.sensor_pool_load_json(jsonData));
+    if (!result) {
+      throw new HTTPCloakError("Failed to load preset pool from JSON");
+    }
+    const data = JSON.parse(result);
+    if (data.error) {
+      throw new HTTPCloakError(data.error);
+    }
+    pool._handle = BigInt(data.handle);
+    return pool;
+  }
+
+  /**
+   * Pick a preset using the pool's configured strategy.
+   * @returns {string} Preset name
+   */
+  pick() {
+    this._checkHandle();
+    return this._parsePoolResult(this._lib.sensor_pool_pick(this._handle));
+  }
+
+  /**
+   * Pick a random preset from the pool.
+   * @returns {string} Preset name
+   */
+  random() {
+    this._checkHandle();
+    return this._parsePoolResult(this._lib.sensor_pool_random(this._handle));
+  }
+
+  /**
+   * Pick the next preset in round-robin order.
+   * @returns {string} Preset name
+   */
+  next() {
+    this._checkHandle();
+    return this._parsePoolResult(this._lib.sensor_pool_next(this._handle));
+  }
+
+  /**
+   * Get a preset by index.
+   * @param {number} index - Zero-based index
+   * @returns {string} Preset name
+   */
+  get(index) {
+    this._checkHandle();
+    return this._parsePoolResult(this._lib.sensor_pool_get(this._handle, index));
+  }
+
+  /**
+   * Number of presets in the pool.
+   * @type {number}
+   */
+  get size() {
+    this._checkHandle();
+    const s = this._lib.sensor_pool_size(this._handle);
+    if (s < 0) {
+      throw new HTTPCloakError("Failed to get pool size");
+    }
+    return Number(s);
+  }
+
+  /**
+   * Name of the preset pool.
+   * @type {string}
+   */
+  get name() {
+    this._checkHandle();
+    return this._parsePoolResult(this._lib.sensor_pool_name(this._handle));
+  }
+
+  /**
+   * Free the pool handle and unregister all its presets.
+   */
+  close() {
+    if (this._handle && this._handle !== 0n && this._handle !== 0) {
+      this._lib.sensor_pool_free(this._handle);
+      this._handle = 0n;
+    }
+  }
+
+  _parsePoolResult(resultPtr) {
+    const result = readAndFreeString(resultPtr);
+    if (!result) {
+      throw new HTTPCloakError("No result from preset pool");
+    }
+    if (result.startsWith("{")) {
+      const data = JSON.parse(result);
+      if (data.error) {
+        throw new HTTPCloakError(data.error);
+      }
+    }
+    return result;
+  }
+
+  _checkHandle() {
+    if (!this._handle || this._handle === 0n || this._handle === 0) {
+      throw new HTTPCloakError("PresetPool is closed");
+    }
+  }
+}
+
+module.exports = {
+  Session,
+  LocalProxy,
+  PresetPool,
+  Response,
+  FastResponse,
+  StreamResponse,
+  Cookie,
+  RedirectInfo,
+  HTTPCloakError,
+  SessionCacheBackend,
+  Preset,
+  loadPreset,
+  loadPresetFromJSON,
+  unregisterPreset,
+  describePreset,
+  configure,
+  configureSessionCache,
+  clearSessionCache,
+  get,
+  post,
+  put,
+  delete: del,
+  patch,
+  head,
+  options,
+  request,
+  version,
+  availablePresets,
+  setEchDnsServers,
+  getEchDnsServers,
+};

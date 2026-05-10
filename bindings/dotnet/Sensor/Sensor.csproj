@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net6.0;net7.0;net8.0;net9.0;net10.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+
+    <!-- NuGet Package Info -->
+    <PackageId>Sensor</PackageId>
+    <Version>1.6.6</Version>
+    <Title>Sensor</Title>
+    <Description>Browser fingerprint emulation HTTP client with HTTP/1.1, HTTP/2, and HTTP/3 support. Bypass bot detection with accurate TLS fingerprints.</Description>
+    <PackageTags>http;http2;http3;quic;tls;fingerprint;browser;scraping;bot-detection</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/jesterfoidchopped/akamai-v3-sensor</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/jesterfoidchopped/akamai-v3-sensor</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+
+    <!-- Native library handling -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+
+    <!-- Include native libraries for all platforms in NuGet package -->
+    <None Include="runtimes\linux-x64\native\*" Pack="true" PackagePath="runtimes\linux-x64\native" />
+    <None Include="runtimes\linux-arm64\native\*" Pack="true" PackagePath="runtimes\linux-arm64\native" />
+    <None Include="runtimes\osx-x64\native\*" Pack="true" PackagePath="runtimes\osx-x64\native" />
+    <None Include="runtimes\osx-arm64\native\*" Pack="true" PackagePath="runtimes\osx-arm64\native" />
+    <None Include="runtimes\win-x64\native\*" Pack="true" PackagePath="runtimes\win-x64\native" />
+
+    <!-- Copy native libraries to output on build -->
+    <None Include="runtimes\linux-x64\native\*" CopyToOutputDirectory="PreserveNewest" Condition="$([MSBuild]::IsOSPlatform('Linux')) And '$(Platform)' != 'ARM64'" Link="%(Filename)%(Extension)" />
+    <None Include="runtimes\linux-arm64\native\*" CopyToOutputDirectory="PreserveNewest" Condition="$([MSBuild]::IsOSPlatform('Linux')) And '$(Platform)' == 'ARM64'" Link="%(Filename)%(Extension)" />
+    <None Include="runtimes\osx-x64\native\*" CopyToOutputDirectory="PreserveNewest" Condition="$([MSBuild]::IsOSPlatform('OSX')) And '$(Platform)' != 'ARM64'" Link="%(Filename)%(Extension)" />
+    <None Include="runtimes\osx-arm64\native\*" CopyToOutputDirectory="PreserveNewest" Condition="$([MSBuild]::IsOSPlatform('OSX')) And '$(Platform)' == 'ARM64'" Link="%(Filename)%(Extension)" />
+    <None Include="runtimes\win-x64\native\*" CopyToOutputDirectory="PreserveNewest" Condition="$([MSBuild]::IsOSPlatform('Windows'))" Link="%(Filename)%(Extension)" />
+  </ItemGroup>
+
+</Project>

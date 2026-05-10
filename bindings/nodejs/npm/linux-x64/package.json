@@ -1,0 +1,27 @@
+{
+  "name": "@sensor/linux-x64",
+  "version": "1.6.6",
+  "description": "HTTPCloak native binary for linux x64",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "lib.js",
+  "module": "lib.mjs",
+  "exports": {
+    ".": {
+      "import": "./lib.mjs",
+      "require": "./lib.js"
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jesterfoidchopped/akamai-v3-sensor"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

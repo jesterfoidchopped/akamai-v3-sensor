@@ -1,0 +1,676 @@
+# HTTPCloak Node.js
+
+Browser fingerprint emulation HTTP client with HTTP/1.1, HTTP/2, and HTTP/3 support.
+
+## Installation
+
+```bash
+npm install sensor
+```
+
+## Quick Start
+
+### Promise-based Usage (Recommended)
+
+```javascript
+const { Session } = require("sensor");
+
+async function main() {
+  const session = new Session({ preset: "chrome-latest" });
+
+  try {
+    // GET request
+    const response = await session.get("https://www.cloudflare.com/cdn-cgi/trace");
+    console.log(response.statusCode);
+    console.log(response.text);
+
+    // POST request with JSON body
+    const postResponse = await session.post("https://api.example.com/data", {
+      key: "value",
+    });
+
+    // Custom headers
+    const customResponse = await session.get("https://example.com", {
+      "X-Custom": "value",
+    });
+
+    // Concurrent requests
+    const responses = await Promise.all([
+      session.get("https://example.com/1"),
+      session.get("https://example.com/2"),
+      session.get("https://example.com/3"),
+    ]);
+  } finally {
+    session.close();
+  }
+}
+
+main();
+```
+
+### ES Modules
+
+```javascript
+import { Session } from "sensor";
+
+const session = new Session({ preset: "chrome-latest" });
+
+const response = await session.get("https://example.com");
+console.log(response.text);
+
+session.close();
+```
+
+### Synchronous Usage
+
+```javascript
+const { Session } = require("sensor");
+
+const session = new Session({ preset: "chrome-latest" });
+
+// Sync GET
+const response = session.getSync("https://example.com");
+console.log(response.statusCode);
+console.log(response.text);
+
+// Sync POST
+const postResponse = session.postSync("https://api.example.com/data", {
+  key: "value",
+});
+
+session.close();
+```
+
+### Callback-based Usage
+
+```javascript
+const { Session } = require("sensor");
+
+const session = new Session({ preset: "chrome-latest" });
+
+// GET with callback
+session.getCb("https://example.com", (err, response) => {
+  if (err) {
+    console.error("Error:", err.message);
+    return;
+  }
+  console.log(response.statusCode);
+  console.log(response.text);
+});
+
+// POST with callback
+session.postCb(
+  "https://api.example.com/data",
+  { key: "value" },
+  (err, response) => {
+    if (err) {
+      console.error("Error:", err.message);
+      return;
+    }
+    console.log(response.statusCode);
+  }
+);
+```
+
+### Streaming Downloads
+
+For large downloads, use streaming to avoid loading entire response into memory:
+
+```javascript
+const { Session } = require("sensor");
+const fs = require("fs");
+
+async function downloadFile() {
+  const session = new Session({ preset: "chrome-latest" });
+
+  try {
+    // Start streaming request
+    const stream = session.getStream("https://example.com/large-file.zip");
+
+    console.log(`Status: ${stream.statusCode}`);
+    console.log(`Content-Length: ${stream.contentLength}`);
+    console.log(`Protocol: ${stream.protocol}`);
+
+    // Read in chunks
+    const file = fs.createWriteStream("downloaded-file.zip");
+    let totalBytes = 0;
+    let chunk;
+
+    while ((chunk = stream.readChunk(65536)) !== null) {
+      file.write(chunk);
+      totalBytes += chunk.length;
+      console.log(`Downloaded ${totalBytes} bytes...`);
+    }
+
+    file.end();
+    stream.close();
+    console.log(`Download complete: ${totalBytes} bytes`);
+  } finally {
+    session.close();
+  }
+}
+
+downloadFile();
+```
+
+### Streaming with All Methods
+
+```javascript
+const { Session } = require("sensor");
+
+const session = new Session({ preset: "chrome-latest" });
+
+// Stream GET
+const getStream = session.getStream("https://example.com/data");
+
+// Stream POST
+const postStream = session.postStream("https://example.com/upload", "data");
+
+// Stream with custom options
+const customStream = session.requestStream({
+  method: "PUT",
+  url: "https://example.com/resource",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ key: "value" }),
+});
+
+// Read response
+let chunk;
+while ((chunk = customStream.readChunk(65536)) !== null) {
+  console.log(`Received ${chunk.length} bytes`);
+}
+customStream.close();
+
+session.close();
+```
+
+## Proxy Support
+
+HTTPCloak supports HTTP, SOCKS5, and HTTP/3 (MASQUE) proxies with full fingerprint preservation.
+
+### HTTP Proxy
+
+```javascript
+const { Session } = require("sensor");
+
+// Basic HTTP proxy
+const session = new Session({
+  preset: "chrome-latest",
+  proxy: "http://host:port",
+});
+
+// With authentication
+const sessionAuth = new Session({
+  preset: "chrome-latest",
+  proxy: "http://user:pass@host:port",
+});
+
+// HTTPS proxy
+const sessionHttps = new Session({
+  preset: "chrome-latest",
+  proxy: "https://user:pass@host:port",
+});
+```
+
+### SOCKS5 Proxy
+
+```javascript
+const { Session } = require("sensor");
+
+// SOCKS5 proxy (with DNS resolution on proxy)
+const session = new Session({
+  preset: "chrome-latest",
+  proxy: "socks5h://host:port",
+});
+
+// With authentication
+const sessionAuth = new Session({
+  preset: "chrome-latest",
+  proxy: "socks5h://user:pass@host:port",
+});
+
+const response = await session.get("https://www.cloudflare.com/cdn-cgi/trace");
+console.log(response.protocol); // h3 (HTTP/3 through SOCKS5!)
+```
+
+### HTTP/3 MASQUE Proxy
+
+MASQUE (RFC 9484) enables HTTP/3 connections through compatible proxies:
+
+```javascript
+const { Session } = require("sensor");
+
+// MASQUE proxy (auto-detected for known providers like Bright Data)
+const session = new Session({
+  preset: "chrome-latest",
+  proxy: "https://user:pass@brd.superproxy.io:10001",
+});
+
+const response = await session.get("https://www.cloudflare.com/cdn-cgi/trace");
+console.log(response.protocol); // h3
+```
+
+### Split Proxy Configuration
+
+Use different proxies for TCP (HTTP/1.1, HTTP/2) and UDP (HTTP/3) traffic:
+
+```javascript
+const { Session } = require("sensor");
+
+const session = new Session({
+  preset: "chrome-latest",
+  tcpProxy: "http://tcp-proxy:port",      // For HTTP/1.1, HTTP/2
+  udpProxy: "https://masque-proxy:port",  // For HTTP/3
+});
+```
+
+## Advanced Features
+
+### Encrypted Client Hello (ECH)
+
+ECH encrypts the SNI (Server Name Indication) to prevent traffic analysis. Works with all Cloudflare domains:
+
+```javascript
+const { Session } = require("sensor");
+
+// Enable ECH for Cloudflare domains
+const session = new Session({
+  preset: "chrome-latest",
+  echConfigDomain: "cloudflare-ech.com",
+});
+
+const response = await session.get("https://www.cloudflare.com/cdn-cgi/trace");
+console.log(response.text);
+// Output includes: sni=encrypted, http=http/3
+```
+
+### Domain Fronting (Connect-To)
+
+Connect to one server while requesting a different domain:
+
+```javascript
+const { Session } = require("sensor");
+
+// Connect to example.com's IP but request www.cloudflare.com
+const session = new Session({
+  preset: "chrome-latest",
+  connectTo: { "www.cloudflare.com": "example.com" },
+});
+
+const response = await session.get("https://www.cloudflare.com/cdn-cgi/trace");
+```
+
+### Combined: SOCKS5 + ECH
+
+Get HTTP/3 with encrypted SNI through a SOCKS5 proxy:
+
+```javascript
+const { Session } = require("sensor");
+
+const session = new Session({
+  preset: "chrome-latest",
+  proxy: "socks5h://user:pass@host:port",
+  echConfigDomain: "cloudflare-ech.com",
+});
+
+const response = await session.get("https://www.cloudflare.com/cdn-cgi/trace");
+// Response shows: http=http/3, sni=encrypted
+```
+
+## Cookie Management
+
+```javascript
+const { Session } = require("sensor");
+
+const session = new Session();
+
+// Set a simple cookie (global, sent to all domains)
+session.setCookie("session_id", "abc123");
+
+// Set a domain-scoped cookie with full metadata
+session.setCookie("auth", "token", {
+  domain: ".example.com",
+  path: "/",
+  secure: true,
+  httpOnly: true,
+  sameSite: "Lax",
+});
+
+// Get all cookies (returns Cookie[] with full metadata)
+const cookies = session.getCookies();
+for (const cookie of cookies) {
+  console.log(`${cookie.name}=${cookie.value} (domain: ${cookie.domain})`);
+}
+
+// Get a specific cookie by name (returns Cookie or null)
+const cookie = session.getCookie("session_id");
+if (cookie) console.log(cookie.value);
+
+// Delete a cookie (omit domain to delete from all domains)
+session.deleteCookie("session_id");
+session.deleteCookie("auth", ".example.com"); // delete from specific domain
+
+// Clear all cookies
+session.clearCookies();
+
+session.close();
+```
+
+## Session Configuration
+
+```javascript
+const { Session } = require("sensor");
+
+const session = new Session({
+  preset: "chrome-latest",           // Browser fingerprint preset
+  proxy: null,                    // Proxy URL
+  tcpProxy: null,                 // Separate TCP proxy
+  udpProxy: null,                 // Separate UDP proxy (MASQUE)
+  timeout: 30,                    // Request timeout in seconds
+  httpVersion: "auto",            // "auto", "h1", "h2", "h3"
+  verify: true,                   // SSL certificate verification
+  allowRedirects: true,           // Follow redirects
+  maxRedirects: 10,               // Maximum redirect count
+  retry: 3,                       // Retry count on failure
+  preferIpv4: false,              // Prefer IPv4 over IPv6
+  connectTo: null,                // Domain fronting map
+  echConfigDomain: null,          // ECH config domain
+});
+```
+
+## Available Presets
+
+```javascript
+const { availablePresets } = require("sensor");
+
+console.log(availablePresets());
+// ['chrome-146', 'chrome-145', 'chrome-144', 'chrome-143', 'chrome-141', 'chrome-133',
+//  'firefox-133', 'safari-18', 'chrome-146-ios', ...]
+```
+
+## Response Object
+
+### Standard Response
+
+```javascript
+const response = await session.get("https://example.com");
+
+response.statusCode;   // number: HTTP status code
+response.headers;      // object: Response headers (values are arrays)
+response.body;         // Buffer: Raw response body
+response.text;         // string: Response body as text
+response.finalUrl;     // string: Final URL after redirects
+response.protocol;     // string: Protocol used (http/1.1, h2, h3)
+response.ok;           // boolean: True if status < 400
+response.cookies;      // array: Cookies from response
+response.history;      // array: Redirect history
+
+// Get specific header
+const contentType = response.getHeader("Content-Type");
+const allCookies = response.getHeaders("Set-Cookie");
+
+// Parse JSON
+const data = response.json();
+```
+
+### Streaming Response
+
+```javascript
+const stream = session.getStream("https://example.com");
+
+stream.statusCode;      // number: HTTP status code
+stream.headers;         // object: Response headers (values are arrays)
+stream.contentLength;   // number: Content length (-1 if unknown)
+stream.finalUrl;        // string: Final URL after redirects
+stream.protocol;        // string: Protocol used
+
+// Read all bytes
+const data = stream.readAll();
+
+// Read in chunks (memory efficient)
+let chunk;
+while ((chunk = stream.readChunk(65536)) !== null) {
+  process(chunk);
+}
+
+stream.close();
+```
+
+## HTTP Methods
+
+```javascript
+const { Session } = require("sensor");
+
+const session = new Session({ preset: "chrome-latest" });
+
+// GET
+const response = await session.get("https://example.com");
+
+// POST
+const postResponse = await session.post("https://example.com", { key: "value" });
+
+// PUT
+const putResponse = await session.put("https://example.com", { key: "value" });
+
+// PATCH
+const patchResponse = await session.patch("https://example.com", { key: "value" });
+
+// DELETE
+const deleteResponse = await session.delete("https://example.com");
+
+// HEAD
+const headResponse = await session.head("https://example.com");
+
+// OPTIONS
+const optionsResponse = await session.options("https://example.com");
+
+// Custom request
+const customResponse = await session.request("PUT", "https://api.example.com/resource", {
+  headers: { "X-Custom": "value" },
+  body: { data: "value" },
+  timeout: 60,
+});
+
+session.close();
+```
+
+## Error Handling
+
+```javascript
+const { Session, HTTPCloakError } = require("sensor");
+
+const session = new Session();
+
+try {
+  const response = await session.get("https://example.com");
+} catch (err) {
+  if (err instanceof HTTPCloakError) {
+    console.error("HTTPCloak error:", err.message);
+  } else {
+    console.error("Unknown error:", err);
+  }
+}
+
+session.close();
+```
+
+## TypeScript Support
+
+HTTPCloak includes TypeScript definitions out of the box:
+
+```typescript
+import { Session, Response, StreamResponse, HTTPCloakError } from "sensor";
+
+const session = new Session({ preset: "chrome-latest" });
+
+async function fetchData(): Promise<Response> {
+  return session.get("https://example.com");
+}
+
+async function downloadLargeFile(): Promise<void> {
+  const stream: StreamResponse = session.getStream("https://example.com/file");
+  let chunk: Buffer | null;
+  while ((chunk = stream.readChunk(65536)) !== null) {
+    // Process chunk
+  }
+  stream.close();
+}
+```
+
+## Local Proxy
+
+Use `LocalProxy` to apply TLS fingerprinting to any HTTP client (axios, node-fetch, etc.).
+
+### HTTPS with True Streaming (Recommended)
+
+For HTTPS requests with full fingerprinting AND true streaming (request/response bodies not materialized into memory), use the `X-HTTPCloak-Scheme` header:
+
+```javascript
+const { LocalProxy } = require("sensor");
+const axios = require("axios");
+
+// Start local proxy with Chrome fingerprint
+const proxy = new LocalProxy({ preset: "chrome-latest" });
+console.log(`Proxy running on ${proxy.proxyUrl}`);
+
+// Use X-HTTPCloak-Scheme header for HTTPS with fingerprinting + streaming
+const response = await axios.get("http://example.com/api", {
+  // Note: http:// URL
+  proxy: {
+    host: "127.0.0.1",
+    port: proxy.port,
+  },
+  headers: {
+    "X-HTTPCloak-Scheme": "https", // Upgrades to HTTPS with fingerprinting
+  },
+});
+
+// This provides:
+// - Full TLS fingerprinting (Chrome/Firefox JA3/JA4)
+// - HTTP/3 support
+// - True streaming (request body NOT materialized into memory)
+// - Header modification capabilities
+
+proxy.close();
+```
+
+**Why use `X-HTTPCloak-Scheme`?**
+
+Standard HTTP proxy clients use CONNECT tunneling for HTTPS, which means the proxy can't inspect or modify the request. The `X-HTTPCloak-Scheme: https` header tells LocalProxy to:
+1. Accept the request as plain HTTP
+2. Upgrade it to HTTPS internally
+3. Apply full TLS fingerprinting
+4. Stream request/response bodies without memory materialization
+
+### Basic Usage
+
+```javascript
+const { LocalProxy } = require("sensor");
+const axios = require("axios");
+
+// Start local proxy with Chrome fingerprint
+const proxy = new LocalProxy({ preset: "chrome-latest" });
+
+// Standard HTTPS (uses CONNECT tunnel - fingerprinting via upstream proxy only)
+const response = await axios.get("https://example.com", {
+  proxy: {
+    host: "127.0.0.1",
+    port: proxy.port,
+  },
+});
+
+// Per-request upstream proxy rotation
+const rotatedResponse = await axios.get("https://example.com", {
+  proxy: {
+    host: "127.0.0.1",
+    port: proxy.port,
+  },
+  headers: {
+    "X-Upstream-Proxy": "http://user:pass@rotating-proxy.com:8080",
+  },
+});
+
+proxy.close();
+```
+
+### TLS-Only Mode
+
+When your client already provides authentic browser headers, use TLS-only mode:
+
+```javascript
+const { LocalProxy } = require("sensor");
+
+// Only apply TLS fingerprint, pass headers through
+const proxy = new LocalProxy({ preset: "chrome-latest", tlsOnly: true });
+
+// Your client's headers are preserved
+const response = await fetch("https://example.com", {
+  agent: new HttpsProxyAgent(proxy.proxyUrl),
+  headers: { "User-Agent": "My Custom UA" },
+});
+
+proxy.close();
+```
+
+### Session Registry
+
+Route different requests through different browser fingerprints:
+
+```javascript
+const { LocalProxy, Session } = require("sensor");
+
+const proxy = new LocalProxy({ preset: "chrome-latest" });
+
+// Create sessions with different fingerprints
+const chromeSession = new Session({ preset: "chrome-latest" });
+const firefoxSession = new Session({ preset: "firefox-133" });
+
+// Register sessions with the proxy
+proxy.registerSession("chrome-user", chromeSession);
+proxy.registerSession("firefox-user", firefoxSession);
+
+// Route requests using X-HTTPCloak-Session header
+const response = await axios.get("https://example.com", {
+  proxy: { host: "127.0.0.1", port: proxy.port },
+  headers: { "X-HTTPCloak-Session": "firefox-user" }, // Uses firefox fingerprint
+});
+
+// Unregister when done
+proxy.unregisterSession("chrome-user");
+proxy.unregisterSession("firefox-user");
+
+chromeSession.close();
+firefoxSession.close();
+proxy.close();
+```
+
+### LocalProxy Options
+
+```javascript
+const proxy = new LocalProxy({
+  port: 0,              // Port (0 = auto-select)
+  preset: "chrome-latest", // Browser fingerprint
+  timeout: 30,          // Request timeout in seconds
+  maxConnections: 1000, // Max concurrent connections
+  tcpProxy: null,       // Default upstream TCP proxy
+  udpProxy: null,       // Default upstream UDP proxy
+  tlsOnly: false,       // TLS-only mode
+});
+
+proxy.port;           // Actual port number
+proxy.proxyUrl;       // Full proxy URL (http://127.0.0.1:port)
+proxy.isRunning;      // True if proxy is active
+proxy.getStats();     // Returns object with request/connection stats
+proxy.close();        // Stop the proxy
+```
+
+## Platform Support
+
+- Linux (x64, arm64)
+- macOS (x64, arm64)
+- Windows (x64, arm64)
+- Node.js 16+
+
+## License
+
+MIT

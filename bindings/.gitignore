@@ -1,0 +1,29 @@
+# Build artifacts
+clib/dist/
+*.so
+*.dylib
+*.dll
+*.h
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+python/sensor/lib/
+
+# Node.js
+node_modules/
+*.tgz
+nodejs/lib/*.so
+nodejs/lib/*.dylib
+nodejs/lib/*.dll
+package-lock.json
+
+# .NET
+dotnet/**/bin/
+dotnet/**/obj/
+dotnet/nupkg/
+*.nupkg

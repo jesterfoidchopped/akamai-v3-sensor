@@ -1,0 +1,368 @@
+name: Build and Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-native:
+    name: Build native library (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            lib_ext: .so
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            lib_ext: .so
+          - os: darwin
+            arch: arm64
+            runner: macos-14
+            lib_ext: .dylib
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+            lib_ext: .dll
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Remove local replace directives and tidy for CI
+        shell: bash
+        run: |
+          cd bindings/clib
+          go mod edit -dropreplace=github.com/sardanioss/utls
+          go mod edit -dropreplace=github.com/sardanioss/net
+          go mod edit -dropreplace=github.com/sardanioss/quic-go
+          go mod edit -dropreplace=github.com/sardanioss/udpbara
+          GONOSUMCHECK='github.com/sardanioss/*' GONOSUMDB='github.com/sardanioss/*' GOFLAGS=-mod=mod go mod tidy
+
+      - name: Build native library (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd bindings/clib
+          chmod +x build.sh
+          ./build.sh native
+        env:
+          CGO_ENABLED: 1
+
+      - name: Build native library (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd bindings/clib
+          mkdir -p dist
+          CGO_ENABLED=1 go build -buildmode=c-shared -ldflags="-s -w" -o dist/libsensor-windows-amd64.dll .
+
+      - name: Upload native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ matrix.os }}-${{ matrix.arch }}
+          path: bindings/clib/dist/libsensor-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.lib_ext }}
+
+  # Build darwin-amd64 from ARM runner (cross-compile)
+  build-darwin-amd64:
+    name: Build native library (darwin-amd64)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Remove local replace directives and tidy for CI
+        run: |
+          cd bindings/clib
+          go mod edit -dropreplace=github.com/sardanioss/utls
+          go mod edit -dropreplace=github.com/sardanioss/net
+          go mod edit -dropreplace=github.com/sardanioss/quic-go
+          go mod edit -dropreplace=github.com/sardanioss/udpbara
+          GONOSUMCHECK='github.com/sardanioss/*' GONOSUMDB='github.com/sardanioss/*' GOFLAGS=-mod=mod go mod tidy
+
+      - name: Build for darwin/amd64
+        run: |
+          cd bindings/clib
+          mkdir -p dist
+          CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -buildmode=c-shared -ldflags="-s -w" -o dist/libsensor-darwin-amd64.dylib .
+        env:
+          CGO_ENABLED: 1
+
+      - name: Upload native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-darwin-amd64
+          path: bindings/clib/dist/libsensor-darwin-amd64.dylib
+
+  build-python-wheels:
+    name: Build Python wheel (${{ matrix.os }}-${{ matrix.arch }})
+    needs: [build-native, build-darwin-amd64]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            plat_tag: manylinux_2_17_x86_64
+          - os: linux
+            arch: arm64
+            plat_tag: manylinux_2_17_aarch64
+          - os: darwin
+            arch: amd64
+            plat_tag: macosx_10_9_x86_64
+          - os: darwin
+            arch: arm64
+            plat_tag: macosx_11_0_arm64
+          - os: windows
+            arch: amd64
+            plat_tag: win_amd64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download native library
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-${{ matrix.os }}-${{ matrix.arch }}
+          path: bindings/python/sensor/lib/
+
+      - name: Build wheel
+        run: |
+          cd bindings/python
+          pip install build wheel
+          python -m build --wheel
+
+      - name: Rename wheel with platform tag
+        run: |
+          cd bindings/python/dist
+          for f in *.whl; do
+            newname=$(echo "$f" | sed 's/-py3-none-any/-py3-none-${{ matrix.plat_tag }}/')
+            mv "$f" "$newname"
+          done
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.arch }}
+          path: bindings/python/dist/*.whl
+
+  build-npm-platform-packages:
+    name: Build npm platform package (${{ matrix.npm_platform }})
+    needs: [build-native, build-darwin-amd64]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            npm_platform: linux-x64
+          - os: linux
+            arch: arm64
+            npm_platform: linux-arm64
+          - os: darwin
+            arch: amd64
+            npm_platform: darwin-x64
+          - os: darwin
+            arch: arm64
+            npm_platform: darwin-arm64
+          - os: windows
+            arch: amd64
+            npm_platform: win32-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download native library
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-${{ matrix.os }}-${{ matrix.arch }}
+          path: bindings/nodejs/npm/${{ matrix.npm_platform }}/
+
+      - name: Upload platform package
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-platform-${{ matrix.npm_platform }}
+          path: bindings/nodejs/npm/${{ matrix.npm_platform }}/
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-python-wheels
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist/
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+
+  publish-npm-platforms:
+    name: Publish npm platform packages
+    needs: build-npm-platform-packages
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: npm
+    strategy:
+      fail-fast: false
+      matrix:
+        npm_platform: [linux-x64, linux-arm64, darwin-x64, darwin-arm64, win32-x64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download platform package
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-platform-${{ matrix.npm_platform }}
+          path: bindings/nodejs/npm/${{ matrix.npm_platform }}/
+
+      - name: Publish platform package
+        run: |
+          cd bindings/nodejs/npm/${{ matrix.npm_platform }}
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-npm-main:
+    name: Publish main npm package
+    needs: publish-npm-platforms
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: npm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish main package
+        run: |
+          cd bindings/nodejs
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  build-nuget:
+    name: Build NuGet package
+    needs: [build-native, build-darwin-amd64]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download linux-amd64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-linux-amd64
+          path: bindings/dotnet/Sensor/runtimes/linux-x64/native/
+
+      - name: Download linux-arm64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-linux-arm64
+          path: bindings/dotnet/Sensor/runtimes/linux-arm64/native/
+
+      - name: Download darwin-amd64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-darwin-amd64
+          path: bindings/dotnet/Sensor/runtimes/osx-x64/native/
+
+      - name: Download darwin-arm64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-darwin-arm64
+          path: bindings/dotnet/Sensor/runtimes/osx-arm64/native/
+
+      - name: Download windows-amd64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: lib-windows-amd64
+          path: bindings/dotnet/Sensor/runtimes/win-x64/native/
+
+      - name: Build NuGet package
+        run: |
+          cd bindings/dotnet/Sensor
+          dotnet pack -c Release -o ../nupkg
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: bindings/dotnet/nupkg/*.nupkg
+
+  publish-nuget:
+    name: Publish to NuGet
+    needs: build-nuget
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment: nuget
+
+    steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download NuGet package
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-package
+          path: nupkg/
+
+      - name: Publish to NuGet
+        run: dotnet nuget push nupkg/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
